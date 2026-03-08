@@ -456,7 +456,7 @@ def make_tf_dataset(
         lambda p, l: _load_and_preprocess(p, l, img_size, split if do_aug else "val"),
         num_parallel_calls=AUTOTUNE
     )
-
+    ds = ds.cache()
     ds = ds.batch(batch_size, drop_remainder=(split == "train"))
 
     if split == "train" and mixup and cutmix:
