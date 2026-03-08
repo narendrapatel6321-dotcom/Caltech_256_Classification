@@ -11,7 +11,6 @@ Functions
     make_tf_dataset(paths, labels, split, img_size, batch_size, augment, mixup, cutmix)
     apply_mixup(images, labels, num_classes, alpha)
     apply_cutmix(images, labels, num_classes, alpha)
-    plot_class_distribution(class_names, counts, title, save_path)
     plot_sample_images(dataset, class_names, n_per_class, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
@@ -480,88 +479,6 @@ def make_tf_dataset(
     return ds
 
 
-# ─────────────────────────────────────────────
-# 3. EDA & Visualization
-# ─────────────────────────────────────────────
-
-def plot_class_distribution(
-    class_names: list,
-    counts:      list,
-    title:       str  = "Class Distribution",
-    save_path         = None
-) -> None:
-    """
-    Plot a bar chart of image counts per class.
-
-    Highlights the top-5 most populated and bottom-5 least populated
-    classes in different colors to make imbalance immediately visible.
-    All other classes are shown in a neutral color.
-
-    Parameters
-    ----------
-    class_names : list of str — class names in label order
-    counts      : list of int — number of images per class, same order as class_names
-    title       : str         — chart title. Default: "Class Distribution"
-    save_path   : str or Path, optional — path to save the figure
-
-    Returns
-    -------
-    None
-
-    Example
-    -------
-    >>> counts = train_df["label"].value_counts().sort_index().values
-    >>> plot_class_distribution(class_names, counts)
-    """
-    counts      = np.array(counts)
-    n           = len(class_names)
-    sorted_idx  = np.argsort(counts)
-    bottom5     = set(sorted_idx[:5])
-    top5        = set(sorted_idx[-5:])
-
-    colors = []
-    for i in range(n):
-        if i in top5:
-            colors.append("#2ecc71")    # green  — most populated
-        elif i in bottom5:
-            colors.append("#e74c3c")    # red    — least populated
-        else:
-            colors.append("#3498db")    # blue   — normal
-
-    plt.style.use("seaborn-v0_8")
-    fig, ax = plt.subplots(figsize=(max(14, n // 8), 5))
-
-    ax.bar(range(n), counts, color=colors, width=0.8)
-
-    ax.set_xlabel("Class Index")
-    ax.set_ylabel("Number of Images")
-    ax.set_title(title)
-    ax.set_xlim(-1, n)
-
-    # Only show every 10th tick to avoid crowding
-    tick_positions = list(range(0, n, 10))
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels(tick_positions, fontsize=8)
-
-    # Legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor="#2ecc71", label=f"Top 5 (most images)"),
-        Patch(facecolor="#3498db", label="Other classes"),
-        Patch(facecolor="#e74c3c", label=f"Bottom 5 (fewest images)"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper right")
-    ax.grid(axis="y", alpha=0.4)
-
-    print(f"   Total images : {counts.sum():,}")
-    print(f"   Min per class: {counts.min()} ({class_names[counts.argmin()]})")
-    print(f"   Max per class: {counts.max()} ({class_names[counts.argmax()]})")
-    print(f"   Mean per class: {counts.mean():.1f}")
-
-    plt.tight_layout()
-    _save_figure(fig, save_path)
-
-
 def plot_sample_images(
     dataset,
     class_names: list,
@@ -608,7 +525,7 @@ def plot_sample_images(
     axes = axes.flatten()
 
     for i in range(n_show):
-        img = np.clip(images[i], 0, 1)
+        img = np.clip(images[i]/255.0, 0, 1)
         axes[i].imshow(img)
         axes[i].set_title(class_names[label_ids[i]], fontsize=7, pad=2)
         axes[i].axis("off")
