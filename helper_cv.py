@@ -149,7 +149,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
 
     class_names = []
     train_rows, val_rows, test_rows = [], [], []
-
+    random.seed(21)
     for label_idx, class_dir in enumerate(class_dirs):
         # Extract clean name e.g. "001.ak47" → "ak47"
         class_name = re.sub(r"^\d+\.", "", class_dir.name)
@@ -159,9 +159,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
             str(p) for p in class_dir.iterdir()
             if p.suffix.lower() in (".jpg", ".jpeg", ".png")
         ])
-
-        random.seed(21)
-        
+ 
         N_TRAIN = 46
         N_VAL   = 9
         N_TEST  = 9
@@ -299,10 +297,9 @@ def apply_mixup(images, labels, num_classes: int, alpha: float = 0.4):
     >>> train_ds = train_ds.map(lambda x, y: apply_mixup(x, y, NUM_CLASSES))
     """
     batch_size = tf.shape(images)[0]
-   
-    # Sample lambda from Beta(alpha, alpha)
-    lam = tf.random.Generator.from_seed(42).make_seeds()
     
+   # Sample lambda from Beta(alpha, alpha)
+    lam = tf.cast(np.random.beta(alpha, alpha, batch_size), tf.float32)
     lam = tf.reshape(lam, [batch_size, 1, 1, 1])
 
     # Shuffle indices for the second sample
@@ -772,16 +769,18 @@ def get_predictions(model, dataset, num_classes: int) -> tuple:
     -------
     >>> y_true, y_pred, y_probs = get_predictions(model, test_ds, NUM_CLASSES)
     """
-    y_pred_probs = model.predict(dataset, verbose=1)
-    y_pred       = np.argmax(y_pred_probs, axis=1)
-
-    y_true_list = []
-    for _, labels in dataset:
+    y_true_list, all_images_list = [], []
+    for images, labels in dataset:
+        all_images_list.append(images.numpy())
         if len(labels.shape) > 1:
             y_true_list.append(np.argmax(labels.numpy(), axis=1))
         else:
             y_true_list.append(labels.numpy())
-    y_true = np.concatenate(y_true_list)
+
+    all_images_arr = np.concatenate(all_images_list, axis=0)
+    y_true         = np.concatenate(y_true_list,     axis=0)
+    y_pred_probs   = model.predict(all_images_arr, verbose=1, batch_size=64)
+    y_pred         = np.argmax(y_pred_probs, axis=1)
 
     # Trim to same length (drop_remainder may cause mismatch)
     min_len  = min(len(y_true), len(y_pred))
@@ -992,7 +991,7 @@ def plot_worst_predictions(
     all_images_arr = np.concatenate(all_images_list, axis=0)
     all_true_arr   = np.concatenate(all_true_list,   axis=0)
 
-    preds        = model.predict(all_images_arr, verbose=0, batch_size=32)
+    preds        = model.predict(all_images_arr, verbose=0, batch_size=64)
     pred_classes = np.argmax(preds, axis=1)
     confidences  = np.max(preds,   axis=1)
 
@@ -1203,7 +1202,7 @@ def plot_grad_cam_grid(
         heatmap_colored = cm.jet(heatmap_resized)[:, :, :3]
 
         # Overlay
-        overlay = 0.55 * np.clip(image, 0, 1) + 0.45 * heatmap_colored
+        overlay = 0.55 * np.clip(image/255.0, 0, 1) + 0.45 * heatmap_colored
         overlay = np.clip(overlay, 0, 1)
 
         correct     = (true_label == pred_label)
@@ -1213,7 +1212,7 @@ def plot_grad_cam_grid(
             f"Pred: {class_names[pred_label]}"
         )
 
-        axes[i, 0].imshow(np.clip(image, 0, 1))
+        axes[i, 0].imshow(np.clip(image/255.0, 0, 1))
         axes[i, 0].set_ylabel(row_title, fontsize=8, color=title_color,
                                rotation=0, labelpad=80, va="center")
         axes[i, 0].axis("off")
