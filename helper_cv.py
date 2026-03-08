@@ -299,7 +299,9 @@ def apply_mixup(images, labels, num_classes: int, alpha: float = 0.4):
     batch_size = tf.shape(images)[0]
     
    # Sample lambda from Beta(alpha, alpha)
-    lam = tf.cast(np.random.beta(alpha, alpha, batch_size), tf.float32)
+    u1  = tf.random.uniform([batch_size], minval=1e-6, maxval=1.0)
+    u2  = tf.random.uniform([batch_size], minval=1e-6, maxval=1.0)
+    lam = u1 / (u1 + u2)
     lam = tf.reshape(lam, [batch_size, 1, 1, 1])
 
     # Shuffle indices for the second sample
@@ -347,8 +349,11 @@ def apply_cutmix(images, labels, num_classes: int, alpha: float = 1.0):
     img_h      = tf.shape(images)[1]
     img_w      = tf.shape(images)[2]
 
-    lam     = float(np.random.beta(alpha, alpha))
-    cut_rat = np.sqrt(1.0 - lam)
+    u1      = tf.random.uniform([], minval=1e-6, maxval=1.0)
+    u2      = tf.random.uniform([], minval=1e-6, maxval=1.0)
+    lam     = u1 / (u1 + u2)
+    
+    cut_rat = tf.sqrt(1.0 - lam)
 
     cut_h = tf.cast(tf.cast(img_h, tf.float32) * cut_rat, tf.int32)
     cut_w = tf.cast(tf.cast(img_w, tf.float32) * cut_rat, tf.int32)
@@ -362,14 +367,12 @@ def apply_cutmix(images, labels, num_classes: int, alpha: float = 1.0):
     y2 = tf.clip_by_value(cy + cut_h // 2, 0, img_h)
 
     # Build mask: 1 outside the box (keep original), 0 inside (replace with patch)
-    mask = tf.ones([img_h, img_w], dtype=tf.float32)
-    patch_zeros = tf.zeros([y2 - y1, x2 - x1], dtype=tf.float32)
-    mask = tf.tensor_scatter_nd_update(
-        mask,
-        tf.reshape(tf.stack(tf.meshgrid(
-            tf.range(y1, y2), tf.range(x1, x2), indexing="ij"
-        ), axis=-1), [-1, 2]),
-        tf.reshape(patch_zeros, [-1])
+    rows = tf.cast(tf.range(img_h)[:, None], tf.float32)
+    cols = tf.cast(tf.range(img_w)[None, :], tf.float32)
+    mask = tf.cast(
+        ~((rows >= tf.cast(y1, tf.float32)) & (rows < tf.cast(y2, tf.float32)) &
+          (cols >= tf.cast(x1, tf.float32)) & (cols < tf.cast(x2, tf.float32))),
+        tf.float32
     )
     mask = tf.reshape(mask, [img_h, img_w, 1])
 
@@ -768,35 +771,29 @@ def get_predictions(model, dataset, num_classes: int) -> tuple:
     -------
     >>> y_true, y_pred, y_probs = get_predictions(model, test_ds, NUM_CLASSES)
     """
-    y_true_list, all_images_list = [], []
-    for images, labels in dataset:
-        all_images_list.append(images.numpy())
+    y_true_list = []
+    for _, labels in dataset:
         if len(labels.shape) > 1:
             y_true_list.append(np.argmax(labels.numpy(), axis=1))
         else:
             y_true_list.append(labels.numpy())
 
-    all_images_arr = np.concatenate(all_images_list, axis=0)
-    y_true         = np.concatenate(y_true_list,     axis=0)
-    y_pred_probs   = model.predict(all_images_arr, verbose=1, batch_size=64)
-    y_pred         = np.argmax(y_pred_probs, axis=1)
+    y_true       = np.concatenate(y_true_list, axis=0)
+    y_pred_probs = model.predict(dataset, verbose=1)
+    y_pred       = np.argmax(y_pred_probs, axis=1)
 
     # Trim to same length (drop_remainder may cause mismatch)
-    min_len  = min(len(y_true), len(y_pred))
-    y_true   = y_true[:min_len]
-    y_pred   = y_pred[:min_len]
+    min_len      = min(len(y_true), len(y_pred))
+    y_true       = y_true[:min_len]
+    y_pred       = y_pred[:min_len]
     y_pred_probs = y_pred_probs[:min_len]
 
     # Top-1
     top1 = np.mean(y_true == y_pred)
 
     # Top-5
-    top5_count = 0
-    for i, true_label in enumerate(y_true):
-        top5_preds = np.argsort(y_pred_probs[i])[-5:]
-        if true_label in top5_preds:
-            top5_count += 1
-    top5 = top5_count / len(y_true)
+    top5_indices = np.argsort(y_pred_probs, axis=1)[:, -5:]
+    top5 = np.mean(np.any(top5_indices == y_true[:, None], axis=1))
 
     print(f"\n Top-1 Accuracy : {top1:.4f} ({top1*100:.2f}%)")
     print(f" Top-5 Accuracy : {top5:.4f} ({top5*100:.2f}%)\n")
@@ -995,21 +992,21 @@ def plot_worst_predictions(
     confidences  = np.max(preds,   axis=1)
 
     wrong_mask = pred_classes != all_true_arr
-    all_images = list(all_images_arr[wrong_mask])
-    all_true   = list(all_true_arr[wrong_mask])
-    all_pred   = list(pred_classes[wrong_mask])
-    all_conf   = list(confidences[wrong_mask])
+    wrong_imgs  = all_images_arr[wrong_mask]
+    wrong_true  = all_true_arr[wrong_mask]
+    wrong_pred  = pred_classes[wrong_mask]
+    wrong_conf  = confidences[wrong_mask]
 
     if not all_images:
         print("No wrong predictions found!")
         return
 
     # Sort by confidence descending — most confidently wrong first
-    sorted_order = np.argsort(all_conf)[::-1]
-    all_images   = [all_images[i] for i in sorted_order[:n]]
-    all_true     = [all_true[i]   for i in sorted_order[:n]]
-    all_pred     = [all_pred[i]   for i in sorted_order[:n]]
-    all_conf     = [all_conf[i]   for i in sorted_order[:n]]
+    sorted_order = np.argsort(wrong_conf)[::-1][:n]
+    wrong_imgs  = wrong_imgs[sorted_order]
+    wrong_true  = wrong_true[sorted_order]
+    wrong_pred  = wrong_pred[sorted_order]
+    wrong_conf  = wrong_conf[sorted_order]
 
     n_cols = 4
     n_rows = (len(all_images) + n_cols - 1) // n_cols
