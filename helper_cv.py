@@ -43,7 +43,6 @@ import tensorflow as tf
 # ─────────────────────────────────────────────
 
 DATASET_URL   = "https://data.caltech.edu/records/nyy15-4j048/files/256_ObjectCategories.tar"
-TRAIN_RATIO   = 0.8
 AUTOTUNE      = tf.data.AUTOTUNE
 
 # Last conv layer name per backbone — needed for Grad-CAM
@@ -88,7 +87,9 @@ def download_and_prepare_dataset(data_dir: str) -> None:
         - Iterates every class folder in 256_ObjectCategories
         - Skips the clutter class (257th folder: '257.clutter')
         - Shuffles images per class with a fixed seed for reproducibility
-        - 80% train / 10% val / 10% test
+        - Fixed 46 train / 9 val / 9 test per class (stratified & balanced)
+        - Minimum class requirement: 64 images (galaxy has 64, safe)
+        - Classes with more images simply have extras unused
 
     Files saved to data_dir:
         train.csv, val.csv, test.csv
@@ -160,18 +161,19 @@ def download_and_prepare_dataset(data_dir: str) -> None:
             if p.suffix.lower() in (".jpg", ".jpeg", ".png")
         ])
 
-        random.seed(42)
+        random.seed(21)
+        
+        N_TRAIN = 46
+        N_VAL   = 9
+        N_TEST  = 9
+
         random.shuffle(images)
 
-        n       = len(images)
-        n_train = int(n * 0.80)
-        n_val   = int(n * 0.10)
-
-        for path in images[:n_train]:
+        for path in images[:N_TRAIN]:
             train_rows.append({"path": path, "label": label_idx})
-        for path in images[n_train:n_train + n_val]:
+        for path in images[N_TRAIN:N_TRAIN + N_VAL]:
             val_rows.append({"path": path, "label": label_idx})
-        for path in images[n_train + n_val:]:
+        for path in images[N_TRAIN + N_VAL:N_TRAIN + N_VAL + N_TEST]:
             test_rows.append({"path": path, "label": label_idx})
 
     # ── Save ──────────────────────────────────────────────────
@@ -401,7 +403,7 @@ def make_tf_dataset(
     augment:    bool = True,
     mixup:      bool = False,
     cutmix:     bool = False,
-    seed:       int  = 42,
+    seed:       int  = 21,
 ) -> tf.data.Dataset:
     """
     Build an optimized tf.data pipeline for image classification.
