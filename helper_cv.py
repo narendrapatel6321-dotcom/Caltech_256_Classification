@@ -981,26 +981,26 @@ def plot_worst_predictions(
     -------
     >>> plot_worst_predictions(best_model, test_ds, class_names, n=12)
     """
-    all_images, all_true, all_pred, all_conf = [], [], [], []
-
+    all_images_list, all_true_list = [], []
     for images, labels in dataset:
-        preds  = model.predict(images, verbose=0)
-        pred_classes = np.argmax(preds, axis=1)
-        confidences  = np.max(preds, axis=1)
-
+        all_images_list.append(images.numpy())
         if len(labels.shape) > 1:
-            true_classes = np.argmax(labels.numpy(), axis=1)
+            all_true_list.append(np.argmax(labels.numpy(), axis=1))
         else:
-            true_classes = labels.numpy()
+            all_true_list.append(labels.numpy())
 
-        wrong_mask = pred_classes != true_classes
-        if wrong_mask.sum() == 0:
-            continue
+    all_images_arr = np.concatenate(all_images_list, axis=0)
+    all_true_arr   = np.concatenate(all_true_list,   axis=0)
 
-        all_images.extend(images.numpy()[wrong_mask])
-        all_true.extend(true_classes[wrong_mask])
-        all_pred.extend(pred_classes[wrong_mask])
-        all_conf.extend(confidences[wrong_mask])
+    preds        = model.predict(all_images_arr, verbose=0, batch_size=32)
+    pred_classes = np.argmax(preds, axis=1)
+    confidences  = np.max(preds,   axis=1)
+
+    wrong_mask = pred_classes != all_true_arr
+    all_images = list(all_images_arr[wrong_mask])
+    all_true   = list(all_true_arr[wrong_mask])
+    all_pred   = list(pred_classes[wrong_mask])
+    all_conf   = list(confidences[wrong_mask])
 
     if not all_images:
         print("No wrong predictions found!")
@@ -1021,7 +1021,7 @@ def plot_worst_predictions(
     axes = axes.flatten()
 
     for i, (img, true, pred, conf) in enumerate(zip(all_images, all_true, all_pred, all_conf)):
-        axes[i].imshow(np.clip(img, 0, 1))
+        axes[i].imshow(np.clip(img/255.0, 0, 1))
         axes[i].set_title(
             f"True: {class_names[true]}\nPred: {class_names[pred]} ({conf:.2f})",
             fontsize=7, color="#e74c3c"
