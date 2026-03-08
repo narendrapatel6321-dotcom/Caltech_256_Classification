@@ -264,7 +264,7 @@ def _load_and_preprocess(path, label, img_size, split):
     else:
         img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
 
-    img = tf.cast(img, tf.float32) / 255.0
+    img = tf.cast(img, tf.float32)
     return img, label
 
 
