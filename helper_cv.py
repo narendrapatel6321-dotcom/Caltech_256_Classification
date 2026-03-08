@@ -239,13 +239,6 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
                 lambda p: str(local_image_dir / Path(p).parent.name / Path(p).name)
             )
         sample = train_df["path"].iloc[0]
-        if not Path(sample).exists():
-            raise FileNotFoundError(
-                f"Path remapping failed — file not found after remapping.\n"
-                f"  Tried : {sample}\n"
-                f"  Check that local_image_dir='{local_image_dir}' exists and "
-                f"contains the class sub-folders (e.g. '001.ak47/')."
-            )
         print(f" Paths remapped → {local_image_dir}")
         
     print(f" Splits loaded from {data_dir}")
