@@ -190,8 +190,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     print(f"   Val     : {len(val_rows):,} images")
     print(f"   Test    : {len(test_rows):,} images")
 
-
-def load_saved_splits(data_dir: str) -> tuple:
+def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     """
     Load the pre-built train/val/test CSV manifests and class names from Drive.
 
@@ -233,13 +232,27 @@ def load_saved_splits(data_dir: str) -> tuple:
 
     with open(data_dir / "class_names.txt") as f:
         class_names = [line.strip() for line in f.readlines()]
-
+    if local_image_dir is not None:
+        local_image_dir = Path(local_image_dir)
+        for df in [train_df, val_df, test_df]:
+            df["path"] = df["path"].apply(
+                lambda p: str(local_image_dir / Path(p).parent.name / Path(p).name)
+            )
+        sample = train_df["path"].iloc[0]
+        if not Path(sample).exists():
+            raise FileNotFoundError(
+                f"Path remapping failed — file not found after remapping.\n"
+                f"  Tried : {sample}\n"
+                f"  Check that local_image_dir='{local_image_dir}' exists and "
+                f"contains the class sub-folders (e.g. '001.ak47/')."
+            )
+        print(f" Paths remapped → {local_image_dir}")
+        
     print(f" Splits loaded from {data_dir}")
     print(f"   Classes : {len(class_names)}")
     print(f"   Train   : {len(train_df):,} | Val : {len(val_df):,} | Test : {len(test_df):,}")
 
     return train_df, val_df, test_df, class_names
-
 
 # ─────────────────────────────────────────────
 # 2. tf.data pipeline
@@ -294,16 +307,10 @@ def apply_mixup(images, labels, num_classes: int, alpha: float = 0.4):
     >>> train_ds = train_ds.map(lambda x, y: apply_mixup(x, y, NUM_CLASSES))
     """
     batch_size = tf.shape(images)[0]
-    lam = tf.cast(
-        tf.random.stateless_binomial(
-            shape=[batch_size], seed=[42, 0],
-            counts=1, probs=tf.fill([batch_size], alpha / (alpha + 1.0))
-        ), tf.float32
-    )
-
+   
     # Sample lambda from Beta(alpha, alpha)
     lam = tf.random.Generator.from_seed(42).make_seeds()
-    lam = tf.cast(np.random.beta(alpha, alpha, batch_size), tf.float32)
+    
     lam = tf.reshape(lam, [batch_size, 1, 1, 1])
 
     # Shuffle indices for the second sample
@@ -370,9 +377,9 @@ def apply_cutmix(images, labels, num_classes: int, alpha: float = 1.0):
     patch_zeros = tf.zeros([y2 - y1, x2 - x1], dtype=tf.float32)
     mask = tf.tensor_scatter_nd_update(
         mask,
-        tf.stack(tf.meshgrid(
+        tf.reshape(tf.stack(tf.meshgrid(
             tf.range(y1, y2), tf.range(x1, x2), indexing="ij"
-        ), axis=-1).reshape(-1, 2),
+        ), axis=-1), [-1, 2]),
         tf.reshape(patch_zeros, [-1])
     )
     mask = tf.reshape(mask, [img_h, img_w, 1])
@@ -462,22 +469,18 @@ def make_tf_dataset(
     if split == "train" and mixup and cutmix:
         # Apply CutMix first, then MixUp — both on the same batch
         ds = ds.map(
-            lambda x, y: apply_cutmix(x, y, num_classes),
-            num_parallel_calls=AUTOTUNE
+            lambda x, y: apply_cutmix(x, y, num_classes)
         )
         ds = ds.map(
-            lambda x, y: apply_mixup(x, y, num_classes),
-            num_parallel_calls=AUTOTUNE
+            lambda x, y: apply_mixup(x, y, num_classes)
         )
     elif split == "train" and mixup:
         ds = ds.map(
-            lambda x, y: apply_mixup(x, y, num_classes),
-            num_parallel_calls=AUTOTUNE
+            lambda x, y: apply_mixup(x, y, num_classes)
         )
     elif split == "train" and cutmix:
         ds = ds.map(
-            lambda x, y: apply_cutmix(x, y, num_classes),
-            num_parallel_calls=AUTOTUNE
+            lambda x, y: apply_cutmix(x, y, num_classes)
         )
 
     ds = ds.prefetch(AUTOTUNE)
