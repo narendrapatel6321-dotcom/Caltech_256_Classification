@@ -18,7 +18,7 @@ Functions
     get_predictions(model, dataset, num_classes)
     evaluate_model(model, dataset, class_names, save_dir, save_prefix)
     plot_per_class_accuracy(y_true, y_pred, class_names, top_n, save_path)
-    plot_worst_predictions(model, dataset, class_names, n, save_path)
+    plot_worst_predictions(y_true, y_pred, probs, dataset, class_names, n, save_path)
     grad_cam(model, image, class_idx, backbone)
     plot_grad_cam_grid(model, dataset, class_names, n, backbone, save_path)
 """
@@ -864,7 +864,7 @@ def evaluate_model(
     )
 
     plot_per_class_accuracy(y_true, y_pred, class_names, save_path=per_class_save)
-    plot_worst_predictions(model, dataset, class_names, save_path=worst_save)
+    plot_worst_predictions(y_true, y_pred, probs, dataset, class_names, save_path=worst_save)
 
 
 def plot_per_class_accuracy(
@@ -947,7 +947,9 @@ def plot_per_class_accuracy(
 
 
 def plot_worst_predictions(
-    model,
+    y_true:      np.ndarray,
+    y_pred:      np.ndarray,
+    probs:       np.ndarray,
     dataset,
     class_names: list,
     n:           int  = 12,
@@ -956,14 +958,16 @@ def plot_worst_predictions(
     """
     Display the N most confidently wrong predictions.
 
-    These are images where the model was very sure of its answer but
-    completely wrong. Reveals systematic failure patterns — e.g. model
-    consistently confusing similar-looking categories.
+    Receives already-computed predictions from evaluate_model (no second
+    inference pass). Only the ~n wrong images are fetched from the dataset
+    on the fly, keeping RAM usage minimal.
 
     Parameters
     ----------
-    model       : tf.keras.Model
-    dataset     : tf.data.Dataset — batched dataset yielding (images, labels)
+    y_true      : np.ndarray — ground truth indices, shape (N,)
+    y_pred      : np.ndarray — predicted indices,    shape (N,)
+    probs       : np.ndarray — softmax probs,         shape (N, num_classes)
+    dataset     : tf.data.Dataset — batched dataset (images only needed for display)
     class_names : list of str
     n           : int             — number of worst predictions to show. Default: 12
     save_path   : str or Path, optional
@@ -974,62 +978,66 @@ def plot_worst_predictions(
 
     Example
     -------
-    >>> plot_worst_predictions(best_model, test_ds, class_names, n=12)
+    >>> plot_worst_predictions(y_true, y_pred, probs, test_ds, class_names, n=12)
     """
-    all_images_list, all_true_list = [], []
-    for images, labels in dataset:
-        all_images_list.append(images.numpy())
-        if len(labels.shape) > 1:
-            all_true_list.append(np.argmax(labels.numpy(), axis=1))
-        else:
-            all_true_list.append(labels.numpy())
+    confidences  = np.max(probs, axis=1)
 
-    all_images_arr = np.concatenate(all_images_list, axis=0)
-    all_true_arr   = np.concatenate(all_true_list,   axis=0)
+    wrong_mask  = y_pred != y_true
+    wrong_indices = np.where(wrong_mask)[0]
 
-    preds        = model.predict(all_images_arr, verbose=0, batch_size=64)
-    pred_classes = np.argmax(preds, axis=1)
-    confidences  = np.max(preds,   axis=1)
-
-    wrong_mask = pred_classes != all_true_arr
-    wrong_imgs  = all_images_arr[wrong_mask]
-    wrong_true  = all_true_arr[wrong_mask]
-    wrong_pred  = pred_classes[wrong_mask]
-    wrong_conf  = confidences[wrong_mask]
-
-    if len(wrong_imgs) == 0:
+    if len(wrong_indices) == 0:
         print("No wrong predictions found!")
         return
 
-    # Sort by confidence descending — most confidently wrong first
-    sorted_order = np.argsort(wrong_conf)[::-1][:n]
-    wrong_imgs  = wrong_imgs[sorted_order]
-    wrong_true  = wrong_true[sorted_order]
-    wrong_pred  = wrong_pred[sorted_order]
-    wrong_conf  = wrong_conf[sorted_order]
+    # Sort wrong predictions by confidence descending — most confidently wrong first
+    sorted_order  = np.argsort(confidences[wrong_indices])[::-1][:n]
+    top_indices   = wrong_indices[sorted_order]   # indices into the flat dataset
+
+    top_true = y_true[top_indices]
+    top_pred = y_pred[top_indices]
+    top_conf = confidences[top_indices]
+
+    # Fetch only the needed images from the dataset on the fly
+    # Collect a flat index → image mapping for just the top_indices
+    needed   = set(top_indices.tolist())
+    idx_to_image = {}
+    flat_idx = 0
+    for images, _ in dataset:
+        batch_np = images.numpy()
+        for img in batch_np:
+            if flat_idx in needed:
+                idx_to_image[flat_idx] = img
+                needed.discard(flat_idx)
+            flat_idx += 1
+            if not needed:
+                break
+        if not needed:
+            break
+
+    display_imgs = [idx_to_image[i] for i in top_indices]
+    actual_n     = len(display_imgs)
 
     n_cols = 4
-    n_rows = (len(wrong_imgs) + n_cols - 1) // n_cols
+    n_rows = (actual_n + n_cols - 1) // n_cols
 
     plt.style.use("seaborn-v0_8")
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3.5, n_rows * 3.5))
     axes = axes.flatten()
 
-    for i, (img, true, pred, conf) in enumerate(zip(wrong_imgs, wrong_true, wrong_pred, wrong_conf)):
-        axes[i].imshow(np.clip(img/255.0, 0, 1))
+    for i, (img, true, pred, conf) in enumerate(zip(display_imgs, top_true, top_pred, top_conf)):
+        axes[i].imshow(np.clip(img / 255.0, 0, 1))
         axes[i].set_title(
             f"True: {class_names[true]}\nPred: {class_names[pred]} ({conf:.2f})",
             fontsize=7, color="#e74c3c"
         )
         axes[i].axis("off")
 
-    for i in range(len(wrong_imgs), len(axes)):
+    for i in range(actual_n, len(axes)):
         axes[i].axis("off")
 
-    plt.suptitle(f"Most Confidently Wrong Predictions (top {len(wrong_imgs)})", fontsize=12)
+    plt.suptitle(f"Most Confidently Wrong Predictions (top {actual_n})", fontsize=12)
     plt.tight_layout()
     _save_figure(fig, save_path)
-
 
 # ─────────────────────────────────────────────
 # 6. Grad-CAM
