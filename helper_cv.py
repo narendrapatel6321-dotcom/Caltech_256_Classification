@@ -997,7 +997,7 @@ def plot_worst_predictions(
     wrong_pred  = pred_classes[wrong_mask]
     wrong_conf  = confidences[wrong_mask]
 
-    if not all_images:
+    if len(wrong_imgs) == 0:
         print("No wrong predictions found!")
         return
 
@@ -1009,13 +1009,13 @@ def plot_worst_predictions(
     wrong_conf  = wrong_conf[sorted_order]
 
     n_cols = 4
-    n_rows = (len(all_images) + n_cols - 1) // n_cols
+    n_rows = (len(wrong_imgs) + n_cols - 1) // n_cols
 
     plt.style.use("seaborn-v0_8")
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3.5, n_rows * 3.5))
     axes = axes.flatten()
 
-    for i, (img, true, pred, conf) in enumerate(zip(all_images, all_true, all_pred, all_conf)):
+    for i, (img, true, pred, conf) in enumerate(zip(wrong_imgs, wrong_true, wrong_pred, wrong_conf)):
         axes[i].imshow(np.clip(img/255.0, 0, 1))
         axes[i].set_title(
             f"True: {class_names[true]}\nPred: {class_names[pred]} ({conf:.2f})",
@@ -1023,10 +1023,10 @@ def plot_worst_predictions(
         )
         axes[i].axis("off")
 
-    for i in range(len(all_images), len(axes)):
+    for i in range(len(wrong_imgs), len(axes)):
         axes[i].axis("off")
 
-    plt.suptitle(f"Most Confidently Wrong Predictions (top {len(all_images)})", fontsize=12)
+    plt.suptitle(f"Most Confidently Wrong Predictions (top {len(wrong_imgs)})", fontsize=12)
     plt.tight_layout()
     _save_figure(fig, save_path)
 
