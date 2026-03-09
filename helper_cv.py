@@ -313,8 +313,8 @@ def apply_mixup(images, labels, num_classes: int, alpha: float = 0.4):
 
     # Convert to one-hot for soft label mixing
     lam_1d       = tf.reshape(lam, [batch_size])
-    labels_oh    = tf.one_hot(labels,  num_classes)
-    labels2_oh   = tf.one_hot(labels2, num_classes)
+    labels_oh  = labels  if labels.dtype  == tf.float32 else tf.one_hot(labels,  num_classes)
+    labels2_oh = labels2 if labels2.dtype == tf.float32 else tf.one_hot(labels2, num_classes)
     mixed_labels = lam_1d[:, None] * labels_oh + (1 - lam_1d[:, None]) * labels2_oh
 
     return mixed_images, mixed_labels
@@ -385,8 +385,8 @@ def apply_cutmix(images, labels, num_classes: int, alpha: float = 1.0):
 
     # Recompute lam based on actual patch area
     actual_lam   = 1.0 - tf.cast((x2 - x1) * (y2 - y1), tf.float32) / tf.cast(img_h * img_w, tf.float32)
-    labels_oh    = tf.one_hot(labels,  num_classes)
-    labels2_oh   = tf.one_hot(labels2, num_classes)
+    labels_oh  = labels  if labels.dtype  == tf.float32 else tf.one_hot(labels,  num_classes)
+    labels2_oh = labels2 if labels2.dtype == tf.float32 else tf.one_hot(labels2, num_classes)
     mixed_labels = actual_lam * labels_oh + (1.0 - actual_lam) * labels2_oh
 
     return mixed_images, mixed_labels
