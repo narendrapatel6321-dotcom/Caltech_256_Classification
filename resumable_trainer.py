@@ -425,24 +425,24 @@ class ResumableTrainer:
         return callbacks
 
     def _check_already_complete(self, epochs: int) -> bool:
-    if self.state.get('training_complete', False):
-        last_epoch = self.state.get('last_epoch', 0)
-        stop_reason = self.state.get('stop_reason', 'completed')
+        if self.state.get('training_complete', False):
+            last_epoch = self.state.get('last_epoch', 0)
+            stop_reason = self.state.get('stop_reason', 'completed')
 
-        if stop_reason == 'early_stopping':
-            print(f" Training was stopped early at epoch {last_epoch} by EarlyStopping. Not resuming.")
-            print(" If you want to continue anyway, call fit() with reset_patience=True.")
+            if stop_reason == 'early_stopping':
+                print(f" Training was stopped early at epoch {last_epoch} by EarlyStopping. Not resuming.")
+                print(" If you want to continue anyway, call fit() with reset_patience=True.")
+                return True
+
+            if epochs > last_epoch:
+                print(f" Previous run completed at epoch {last_epoch}, but epochs={epochs} — resuming for {epochs - last_epoch} more epochs.")
+                self.state['training_complete'] = False
+                self._save_state()
+                return False
+
+            print(" Training already complete! Nothing to resume.")
             return True
-
-        if epochs > last_epoch:
-            print(f" Previous run completed at epoch {last_epoch}, but epochs={epochs} — resuming for {epochs - last_epoch} more epochs.")
-            self.state['training_complete'] = False
-            self._save_state()
-            return False
-
-        print(" Training already complete! Nothing to resume.")
-        return True
-    return False
+        return False
 
     # ── Public API ────────────────────────────────────────────
 
@@ -470,6 +470,7 @@ class ResumableTrainer:
             self.state['patience_counter'] = 0
             self.state['best_val_metric'] = None
             self.state['best_epoch'] = None
+            self.state['stop_reason'] = 'completed'
             print("Patience counter reset. Training will start fresh evaluation.")
             self._save_state()
         
@@ -524,7 +525,7 @@ class ResumableTrainer:
                         "If intentional, delete the checkpoint directory and retrain from scratch."
                         )
                 
-            # Warn + auto-apply
+                # Warn + auto-apply
                 new_lr = float(temp_model.optimizer.learning_rate)
                 old_lr = float(self.model.optimizer.learning_rate)
                 if new_lr != old_lr:
@@ -568,7 +569,7 @@ class ResumableTrainer:
             print("  Did you pass the same total epochs value as the original session?")
             return None
             
-       # 7. Train
+        # 7. Train
         for _key in ('epochs', 'initial_epoch', 'validation_data', 'callbacks'):
             fit_kwargs.pop(_key, None)
 
