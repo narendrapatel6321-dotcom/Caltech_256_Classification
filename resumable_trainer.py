@@ -81,12 +81,13 @@ class TrainingStateCallback(Callback):
     Tracks: current epoch, best val metric, early stopping counter, completion flag.
     """
 
-    def __init__(self, state_path, monitor='val_accuracy', mode='max'):
+    def __init__(self, state_path, monitor='val_accuracy', mode='max', early_stopping_cb=None):
         super().__init__()
         self.state_path = Path(state_path)
         self.monitor = monitor
         self.mode = mode
         self.state = {}
+        self.early_stopping_cb = early_stopping_cb
 
     def set_state(self, state: dict):
         """Load existing state (called before training begins)."""
@@ -112,9 +113,11 @@ class TrainingStateCallback(Callback):
                     self.state['best_val_metric'] = float(current_val)
                     self.state['patience_counter'] = 0
                     self.state['best_epoch'] = epoch + 1
-                    
                 else:
-                    self.state['patience_counter'] = self.state.get('patience_counter', 0) + 1
+                    if self.early_stopping_cb is not None:
+                        self.state['patience_counter'] = int(self.early_stopping_cb.wait)
+                    else:
+                        self.state['patience_counter'] = self.state.get('patience_counter', 0) + 1
 
         self.state['last_epoch'] = epoch + 1  # 1-indexed (next epoch to run)
         self.state['last_updated'] = datetime.now().isoformat()
@@ -125,6 +128,10 @@ class TrainingStateCallback(Callback):
     def on_train_end(self, logs=None):
         self.state['training_complete'] = True
         self.state['last_updated'] = datetime.now().isoformat()
+        if self.early_stopping_cb is not None and self.early_stopping_cb.stopped_epoch > 0:
+            self.state['stop_reason'] = 'early_stopping'
+        else:
+            self.state['stop_reason'] = 'completed'
         self._atomic_save()
         print(f"\n Training state saved → {self.state_path}")
 
@@ -331,7 +338,7 @@ class ResumableTrainer:
 
         print(" No valid checkpoints found — starting from scratch")
         return None, 0
-
+    
     def _build_callbacks(self) -> list:
         """Build all callbacks with restored state."""
         callbacks = []
@@ -352,50 +359,57 @@ class ResumableTrainer:
             save_best_only=False,
             verbose=0
         ))
-
+        
         # 3. Stateful EarlyStopping (restores patience counter)
-        callbacks.append(StatefulEarlyStopping(
+        early_stopping = StatefulEarlyStopping(
             monitor=self.monitor,
             patience=self.patience,
             mode=self.mode,
             restore_best_weights=True,
             verbose=1,
             saved_best=self.state.get('best_val_metric', None),
-            saved_patience_counter=self.state.get('patience_counter', 0)
-        ))
+            saved_patience_counter=self.state.get('patience_counter', 0),
+            best_model_path=self.best_model_path
+        )
+        callbacks.append(early_stopping)
 
-        # 4. Safe CSV Logger (cleans duplicate headers from crashed sessions on startup)
+        # 4. Safe CSV Logger 
         callbacks.append(SafeCSVLogger(
             filename=str(self.csv_log_path),
             append=True
         ))
 
-        # 5. Training state saver
+        # 5. Training state saver — receives reference to EarlyStopping
         state_cb = TrainingStateCallback(
             state_path=self.state_path,
             monitor=self.monitor,
-            mode=self.mode
+            mode=self.mode,
+            early_stopping_cb=early_stopping  
         )
         state_cb.set_state(self.state)
         callbacks.append(state_cb)
-
+        
         return callbacks
 
     def _check_already_complete(self, epochs: int) -> bool:
-        """Return True only if training is complete AND no new epochs requested."""
-        if self.state.get('training_complete', False):
-            last_epoch = self.state.get('last_epoch', 0)
-            if epochs > last_epoch:
-                print(f" Previous run completed at epoch {last_epoch}, but epochs={epochs} — resuming for {epochs - last_epoch} more epochs.")
-                # Persist immediately — a crash before epoch 1 would otherwise
-                # leave training_complete=True in the JSON next session
-                self.state['training_complete'] = False
-                self._save_state()
-                return False
-            else:
-                print(" Training already complete! Nothing to resume.")
-                return True
-        return False
+    if self.state.get('training_complete', False):
+        last_epoch = self.state.get('last_epoch', 0)
+        stop_reason = self.state.get('stop_reason', 'completed')
+
+        if stop_reason == 'early_stopping':
+            print(f" Training was stopped early at epoch {last_epoch} by EarlyStopping. Not resuming.")
+            print(" If you want to continue anyway, call fit() with reset_patience=True.")
+            return True
+
+        if epochs > last_epoch:
+            print(f" Previous run completed at epoch {last_epoch}, but epochs={epochs} — resuming for {epochs - last_epoch} more epochs.")
+            self.state['training_complete'] = False
+            self._save_state()
+            return False
+
+        print(" Training already complete! Nothing to resume.")
+        return True
+    return False
 
     # ── Public API ────────────────────────────────────────────
 
