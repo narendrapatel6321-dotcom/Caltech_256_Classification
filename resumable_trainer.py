@@ -17,6 +17,8 @@ import glob
 from pathlib import Path
 from datetime import datetime
 import hashlib
+import gc
+import re
 import tensorflow as tf
 from tensorflow.keras.callbacks import (
     ModelCheckpoint, EarlyStopping, CSVLogger, Callback
@@ -122,7 +124,14 @@ class TrainingStateCallback(Callback):
         self.state['last_epoch'] = epoch + 1  # 1-indexed (next epoch to run)
         self.state['last_updated'] = datetime.now().isoformat()
         self.state['training_complete'] = False
-
+        if self.model is not None and self.model.optimizer is not None:
+            try:
+                lr = self.model.optimizer.learning_rate
+                self.state['learning_rate'] = float(
+                    tf.keras.backend.get_value(lr)
+                )
+            except AttributeError:
+                pass  
         self._atomic_save()
 
     def on_train_end(self, logs=None):
@@ -153,18 +162,26 @@ class StatefulEarlyStopping(EarlyStopping):
     from a saved state — so patience carries over across sessions.
     """
 
-    def __init__(self, saved_best=None, saved_patience_counter=0, **kwargs):
+    def __init__(self, saved_best=None, saved_patience_counter=0, best_model_path=None, **kwargs):
         super().__init__(**kwargs)
         self._saved_best = saved_best
         self._saved_patience_counter = saved_patience_counter
+        self.best_model_path = best_model_path
 
     def on_train_begin(self, logs=None):
         super().on_train_begin(logs)
-        # Restore internal state if available
         if self._saved_best is not None:
             self.best = self._saved_best
             self.wait = self._saved_patience_counter
-            self.best_weights = self.model.get_weights() 
+            if self.best_model_path is not None and Path(self.best_model_path).exists():
+                checkpoint_weights = self.model.get_weights()
+                best_model = tf.keras.models.load_model(str(self.best_model_path))
+                self.best_weights = best_model.get_weights()
+                del best_model
+                gc.collect()
+                self.model.set_weights(checkpoint_weights)
+            else:
+                self.best_weights = self.model.get_weights()
             print(f" EarlyStopping restored — best={self.best:.4f}, patience_counter={self.wait}")
 
 
@@ -273,10 +290,11 @@ class ResumableTrainer:
         print(f" Checkpoint directory: {self.ckpt_dir}")
 
     # ── Internal helpers ──────────────────────────────────────
-    def _get_architecture_hash(self, model=None) -> str:
-        """Hash the current model_fn architecture to detect changes."""
-        m = model if model is not None else self.model_fn()
-        config = m.to_json()
+    def _get_architecture_hash(self, model) -> str:
+        """Hash the model architecture to detect changes between sessions."""
+        if model is None:
+            raise ValueError("_get_architecture_hash() requires an explicit model argument.")
+        config = model.to_json()
         return hashlib.md5(config.encode()).hexdigest()
         
     def _load_state(self) -> dict:
@@ -284,8 +302,25 @@ class ResumableTrainer:
         # Clean up any abandoned .tmp file from a previous crash
         tmp = self.state_path.with_suffix('.tmp')
         if tmp.exists():
-            tmp.unlink()
-            print(" Cleaned up leftover .tmp state file")
+            try:
+                with open(tmp) as f:
+                    tmp_state = json.load(f)
+                if not self.state_path.exists():
+                    tmp.replace(self.state_path)
+                    print(" Recovered state from leftover .tmp file")
+                else:
+                    with open(self.state_path) as f:
+                        json_epoch = json.load(f).get('last_epoch', -1)
+                    tmp_epoch = tmp_state.get('last_epoch', -1)
+                    if tmp_epoch > json_epoch:
+                        tmp.replace(self.state_path)
+                        print(f" .tmp had newer state (epoch {tmp_epoch} vs {json_epoch}) — recovered")
+                    else:
+                        tmp.unlink()
+                        print(" Cleaned up leftover .tmp state file")
+            except (json.JSONDecodeError, OSError):
+                tmp.unlink()
+                print(" Leftover .tmp was corrupted — discarded")
 
         if self.state_path.exists():
             try:
@@ -317,10 +352,8 @@ class ResumableTrainer:
 
         if files:
             def epoch_num(f):
-                try:
-                    return int(f.split("_epoch_")[-1].split(".keras")[0])
-                except Exception:
-                    return -1
+                match = re.search(r'_epoch_(\d+)\.keras$', f)
+                return int(match.group(1)) if match else -1
 
             # Try from newest to oldest — skip suspiciously small (corrupted) files
             for f in sorted(files, key=epoch_num, reverse=True):
@@ -439,74 +472,78 @@ class ResumableTrainer:
             self.state['best_epoch'] = None
             print("Patience counter reset. Training will start fresh evaluation.")
             self._save_state()
-
+        
         # 3. Find latest checkpoint
         latest_ckpt, resume_epoch = self._get_latest_checkpoint()
 
         # 4. Load or build model
+        
         if latest_ckpt:
             print(f"\n Resuming from epoch {resume_epoch} → {latest_ckpt}")
             self.model = tf.keras.models.load_model(latest_ckpt)
             temp_model = self.model_fn()
-            saved_hash = self.state.get('architecture_hash')
-            if saved_hash:
-                current_hash = self._get_architecture_hash(model = temp_model)
-                if saved_hash != current_hash:
-                    raise RuntimeError(
-                    "Model architecture has changed since the last checkpoint!\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch." )
+            try :
+                saved_hash = self.state.get('architecture_hash')
+                if saved_hash:
+                    current_hash = self._get_architecture_hash(model = temp_model)
+                    if saved_hash != current_hash:
+                        raise RuntimeError(
+                        "Model architecture has changed since the last checkpoint!\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch." )
    
-            # Hard errors
-            if type(temp_model.optimizer).__name__ != self.state.get('optimizer'):
-                raise RuntimeError(
-                    f"Optimizer changed since last checkpoint: "
-                    f"{self.state.get('optimizer')} -> {type(temp_model.optimizer).__name__}\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch."
-                    )
-            if temp_model.loss != self.state.get('loss'):
-                raise RuntimeError(
-                    f"Loss function changed since last checkpoint: "
-                    f"{self.state.get('loss')} -> {temp_model.loss}\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch."
-                    )
-            new_metrics = temp_model.metrics_names
-            if new_metrics != self.state.get('metrics'):
-                raise RuntimeError(
-                    f"Metrics changed since last checkpoint: "
-                    f"{self.state.get('metrics')} -> {new_metrics}\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch."
-                    )
-            if self.monitor != self.state.get('monitor'):
-                raise RuntimeError(
-                    f"Monitor metric changed since last checkpoint: "
-                    f"{self.state.get('monitor')} -> {self.monitor}\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch."
-                    )
-            if self.mode != self.state.get('mode'):
-                raise RuntimeError(
-                    f"Mode changed since last checkpoint: "
-                    f"{self.state.get('mode')} -> {self.mode}\n"
-                    "If intentional, delete the checkpoint directory and retrain from scratch."
-                    )
+                # Hard errors
+                if type(temp_model.optimizer).__name__ != self.state.get('optimizer'):
+                    raise RuntimeError(
+                        f"Optimizer changed since last checkpoint: "
+                        f"{self.state.get('optimizer')} -> {type(temp_model.optimizer).__name__}\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        )
+                if temp_model.loss != self.state.get('loss'):
+                    raise RuntimeError(
+                        f"Loss function changed since last checkpoint: "
+                        f"{self.state.get('loss')} -> {temp_model.loss}\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        )
+                new_metrics = temp_model.metrics_names
+                if new_metrics != self.state.get('metrics'):
+                    raise RuntimeError(
+                        f"Metrics changed since last checkpoint: "
+                        f"{self.state.get('metrics')} -> {new_metrics}\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        )
+                if self.monitor != self.state.get('monitor'):
+                    raise RuntimeError(
+                        f"Monitor metric changed since last checkpoint: "
+                        f"{self.state.get('monitor')} -> {self.monitor}\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        )
+                if self.mode != self.state.get('mode'):
+                    raise RuntimeError(
+                        f"Mode changed since last checkpoint: "
+                        f"{self.state.get('mode')} -> {self.mode}\n"
+                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        )
                 
             # Warn + auto-apply
-            new_lr = float(temp_model.optimizer.learning_rate)
-            old_lr = float(self.model.optimizer.learning_rate)
-            if new_lr != old_lr:
-                print(f"Learning rate changed: {old_lr} -> {new_lr}. Applying new LR.")
-                self.model.optimizer.learning_rate.assign(new_lr)
-                self.state['learning_rate'] = new_lr 
+                new_lr = float(temp_model.optimizer.learning_rate)
+                old_lr = float(self.model.optimizer.learning_rate)
+                if new_lr != old_lr:
+                    print(f"Learning rate changed: {old_lr} -> {new_lr}. Applying new LR.")
+                    self.model.optimizer.learning_rate.assign(new_lr)
+                    self.state['learning_rate'] = new_lr 
 
-            if self.patience != self.state.get('patience'):
-                print(f"Patience changed: {self.state.get('patience')} -> {self.patience}. Applying.")
-                self.state['patience'] = self.patience
+                if self.patience != self.state.get('patience'):
+                    print(f"Patience changed: {self.state.get('patience')} -> {self.patience}. Applying.")
+                    self.state['patience'] = self.patience
 
-            if self.save_freq != self.state.get('save_freq'):
-                print(f"Save frequency changed: {self.state.get('save_freq')} -> {self.save_freq}. Applying.")
-                self.state['save_freq'] = self.save_freq
+                if self.save_freq != self.state.get('save_freq'):
+                    print(f"Save frequency changed: {self.state.get('save_freq')} -> {self.save_freq}. Applying.")
+                    self.state['save_freq'] = self.save_freq
                 
-            self.initial_epoch = resume_epoch
-            del temp_model
+                self.initial_epoch = resume_epoch
+            finally : 
+                del temp_model
+                gc.collect()
         else:
             print("\n No checkpoint found — starting from scratch")
             self.model = self.model_fn()
@@ -530,16 +567,19 @@ class ResumableTrainer:
             print(f"  initial_epoch ({self.initial_epoch}) >= epochs ({epochs}). Nothing to train.")
             print("  Did you pass the same total epochs value as the original session?")
             return None
+            
+       # 7. Train
+        for _key in ('epochs', 'initial_epoch', 'validation_data', 'callbacks'):
+            fit_kwargs.pop(_key, None)
 
-        # 7. Train
         fit_args = dict(
             validation_data=val_data,
             epochs=epochs,
-            initial_epoch=self.initial_epoch,   # <- critical
+            initial_epoch=self.initial_epoch,
             callbacks=callbacks,
             **fit_kwargs
         )
-
+        
         print(f"\n  Training from epoch {self.initial_epoch} → {epochs}\n")
         if isinstance(train_data, tf.data.Dataset):
             history = self.model.fit(train_data, **fit_args)
