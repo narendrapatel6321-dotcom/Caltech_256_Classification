@@ -8,9 +8,7 @@ Functions
 ---------
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
-    make_tf_dataset(paths, labels, split, img_size, batch_size, augment, mixup, cutmix)
-    apply_mixup(images, labels, num_classes, alpha)
-    apply_cutmix(images, labels, num_classes, alpha)
+    make_tf_dataset(paths, labels, split, img_size, batch_size, augment)
     plot_sample_images(dataset, class_names, n_per_class, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
@@ -21,6 +19,7 @@ Functions
     plot_worst_predictions(y_true, y_pred, probs, dataset, class_names, n, save_path)
     grad_cam(model, image, class_idx, backbone)
     plot_grad_cam_grid(model, dataset, class_names, n, backbone, save_path)
+    get_best_model_path(experiment_name)
 """
 
 import os
@@ -270,128 +269,6 @@ def _load_and_preprocess(path, label, img_size, split):
     img = tf.cast(img, tf.float32)
     return img, label
 
-
-def apply_mixup(images, labels, num_classes: int, alpha: float = 0.4):
-    """
-    Apply MixUp augmentation to a batch of images.
-
-    Linearly interpolates between two random samples in the batch for both
-    images and their one-hot labels. Forces the model to learn smoother
-    decision boundaries and reduces overconfidence.
-
-    Parameters
-    ----------
-    images      : tf.Tensor — batch of images, shape (B, H, W, C)
-    labels      : tf.Tensor — integer labels, shape (B,)
-    num_classes : int       — total number of classes
-    alpha       : float     — Beta distribution concentration parameter.
-                              Higher = stronger mixing. Typical range: 0.2–0.4
-
-    Returns
-    -------
-    mixed_images : tf.Tensor — shape (B, H, W, C)
-    mixed_labels : tf.Tensor — soft one-hot labels, shape (B, num_classes)
-
-    Example
-    -------
-    >>> train_ds = train_ds.map(lambda x, y: apply_mixup(x, y, NUM_CLASSES))
-    """
-    batch_size = tf.shape(images)[0]
-    
-   # Sample lambda from Beta(alpha, alpha)
-    u1  = tf.random.uniform([batch_size], minval=1e-6, maxval=1.0)
-    u2  = tf.random.uniform([batch_size], minval=1e-6, maxval=1.0)
-    lam = u1 / (u1 + u2)
-    lam = tf.reshape(lam, [batch_size, 1, 1, 1])
-
-    # Shuffle indices for the second sample
-    indices     = tf.random.shuffle(tf.range(batch_size))
-    images2     = tf.gather(images, indices)
-    labels2     = tf.gather(labels, indices)
-
-    mixed_images = lam * tf.cast(images, tf.float32) + (1 - lam) * tf.cast(images2, tf.float32)
-
-    # Convert to one-hot for soft label mixing
-    lam_1d       = tf.reshape(lam, [batch_size])
-    labels_oh  = labels  if labels.dtype  == tf.float32 else tf.one_hot(labels,  num_classes)
-    labels2_oh = labels2 if labels2.dtype == tf.float32 else tf.one_hot(labels2, num_classes)
-    mixed_labels = lam_1d[:, None] * labels_oh + (1 - lam_1d[:, None]) * labels2_oh
-
-    return mixed_images, mixed_labels
-
-
-def apply_cutmix(images, labels, num_classes: int, alpha: float = 1.0):
-    """
-    Apply CutMix augmentation to a batch of images.
-
-    Cuts a random rectangular patch from one image and pastes it into another.
-    Labels are mixed proportionally to the patch area. Complements MixUp by
-    encouraging the model to focus on all object parts, not just the whole image.
-
-    Parameters
-    ----------
-    images      : tf.Tensor — batch of images, shape (B, H, W, C)
-    labels      : tf.Tensor — integer labels, shape (B,)
-    num_classes : int       — total number of classes
-    alpha       : float     — Beta distribution parameter for patch size.
-                              alpha=1.0 gives uniform random patch sizes.
-
-    Returns
-    -------
-    mixed_images : tf.Tensor — shape (B, H, W, C)
-    mixed_labels : tf.Tensor — soft one-hot labels, shape (B, num_classes)
-
-    Example
-    -------
-    >>> train_ds = train_ds.map(lambda x, y: apply_cutmix(x, y, NUM_CLASSES))
-    """
-    batch_size = tf.shape(images)[0]
-    img_h      = tf.shape(images)[1]
-    img_w      = tf.shape(images)[2]
-
-    u1      = tf.random.uniform([], minval=1e-6, maxval=1.0)
-    u2      = tf.random.uniform([], minval=1e-6, maxval=1.0)
-    lam     = u1 / (u1 + u2)
-    
-    cut_rat = tf.sqrt(1.0 - lam)
-
-    cut_h = tf.cast(tf.cast(img_h, tf.float32) * cut_rat, tf.int32)
-    cut_w = tf.cast(tf.cast(img_w, tf.float32) * cut_rat, tf.int32)
-
-    cx = tf.random.uniform([], 0, img_w, dtype=tf.int32)
-    cy = tf.random.uniform([], 0, img_h, dtype=tf.int32)
-
-    x1 = tf.clip_by_value(cx - cut_w // 2, 0, img_w)
-    x2 = tf.clip_by_value(cx + cut_w // 2, 0, img_w)
-    y1 = tf.clip_by_value(cy - cut_h // 2, 0, img_h)
-    y2 = tf.clip_by_value(cy + cut_h // 2, 0, img_h)
-
-    # Build mask: 1 outside the box (keep original), 0 inside (replace with patch)
-    rows = tf.cast(tf.range(img_h)[:, None], tf.float32)
-    cols = tf.cast(tf.range(img_w)[None, :], tf.float32)
-    mask = tf.cast(
-        ~((rows >= tf.cast(y1, tf.float32)) & (rows < tf.cast(y2, tf.float32)) &
-          (cols >= tf.cast(x1, tf.float32)) & (cols < tf.cast(x2, tf.float32))),
-        tf.float32
-    )
-    mask = tf.reshape(mask, [img_h, img_w, 1])
-
-    indices      = tf.random.shuffle(tf.range(batch_size))
-    images2      = tf.gather(images, indices)
-    labels2      = tf.gather(labels, indices)
-
-    mixed_images = (tf.cast(images, tf.float32) * mask
-                    + tf.cast(images2, tf.float32) * (1.0 - mask))
-
-    # Recompute lam based on actual patch area
-    actual_lam   = 1.0 - tf.cast((x2 - x1) * (y2 - y1), tf.float32) / tf.cast(img_h * img_w, tf.float32)
-    labels_oh  = labels  if labels.dtype  == tf.float32 else tf.one_hot(labels,  num_classes)
-    labels2_oh = labels2 if labels2.dtype == tf.float32 else tf.one_hot(labels2, num_classes)
-    mixed_labels = actual_lam * labels_oh + (1.0 - actual_lam) * labels2_oh
-
-    return mixed_images, mixed_labels
-
-
 def make_tf_dataset(
     paths,
     labels,
@@ -400,8 +277,6 @@ def make_tf_dataset(
     img_size:   int  = 224,
     batch_size: int  = 32,
     augment:    bool = True,
-    mixup:      bool = False,
-    cutmix:     bool = False,
     seed:       int  = 21,
 ) -> tf.data.Dataset:
     """
@@ -420,25 +295,20 @@ def make_tf_dataset(
     img_size    : int  — images are resized to (img_size, img_size). Default: 224
     batch_size  : int  — batch size. Default: 32
     augment     : bool — enable standard augmentation (train only). Default: True
-    mixup       : bool — apply MixUp after batching. Default: False
-    cutmix      : bool — apply CutMix after batching. Default: False
-                         If both mixup and cutmix are True, CutMix is applied
-                         first then MixUp — stronger combined regularization.
     seed        : int  — shuffle seed. Default: 42
 
     Returns
     -------
     tf.data.Dataset yielding (images, labels) batches.
         - images shape : (batch_size, img_size, img_size, 3), float32, range [0, 1]
-        - labels shape : (batch_size,) int   — OR (batch_size, num_classes) float if MixUp/CutMix
+        - labels shape : (batch_size,) int  
 
     Example
     -------
     >>> train_ds = make_tf_dataset(
     ...     train_df["path"].values, train_df["label"].values,
     ...     split="train", num_classes=NUM_CLASSES,
-    ...     img_size=IMG_SIZE, batch_size=BATCH_SIZE,
-    ...     mixup=True
+    ...     img_size=IMG_SIZE, batch_size=BATCH_SIZE
     ... )
     """
     do_aug = augment and (split == "train")
@@ -456,24 +326,7 @@ def make_tf_dataset(
         num_parallel_calls=AUTOTUNE
     )
     ds = ds.batch(batch_size, drop_remainder=(split == "train"))
-
-    if split == "train" and mixup and cutmix:
-        # Apply CutMix first, then MixUp — both on the same batch
-        ds = ds.map(
-            lambda x, y: apply_cutmix(x, y, num_classes)
-        )
-        ds = ds.map(
-            lambda x, y: apply_mixup(x, y, num_classes)
-        )
-    elif split == "train" and mixup:
-        ds = ds.map(
-            lambda x, y: apply_mixup(x, y, num_classes)
-        )
-    elif split == "train" and cutmix:
-        ds = ds.map(
-            lambda x, y: apply_cutmix(x, y, num_classes)
-        )
-
+    
     ds = ds.prefetch(AUTOTUNE)
     return ds
 
@@ -661,7 +514,10 @@ def plot_training_curve(csv_path: str, save_path=None) -> None:
 
     plt.tight_layout()
     _save_figure(fig, save_path)
-
+    
+def get_best_model_path(experiment_name: str) -> Path:
+    """Get best model path for any experiment without needing the trainer object."""
+    return Path(CKPT_ROOT) / PROJECT / experiment_name / f"{experiment_name}_best.keras"
 
 def compare_experiments(
     csv_paths: dict,
