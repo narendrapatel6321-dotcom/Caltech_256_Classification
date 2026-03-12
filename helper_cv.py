@@ -9,20 +9,18 @@ Functions
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
     make_tf_dataset(paths, labels, split, img_size, batch_size, augment)
-    plot_sample_images(dataset, class_names, n_per_class, save_path)
+    plot_sample_images(dataset, class_names, n_per_row, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
-    compare_experiments(csv_paths, labels, metric, save_path)
     get_predictions(model, dataset, num_classes)
     evaluate_model(model, dataset, class_names, save_dir, save_prefix)
     plot_per_class_accuracy(y_true, y_pred, class_names, top_n, save_path)
     plot_worst_predictions(y_true, y_pred, probs, dataset, class_names, n, save_path)
     grad_cam(model, image, class_idx, backbone)
     plot_grad_cam_grid(model, dataset, class_names, n, backbone, save_path)
-    get_best_model_path(experiment_name)
+    get_best_model_path(ckpt_root, project, experiment_name)
 """
 
-import os
 import re
 import tarfile
 import urllib.request
@@ -30,7 +28,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-import seaborn as sns
 from pathlib import Path
 from sklearn.metrics import classification_report
 import tensorflow as tf
@@ -572,7 +569,7 @@ def evaluate_model(
     Full evaluation pipeline — Top-1/5 accuracy, classification report,
     per-class accuracy chart, and worst predictions.
 
-    Convenience wrapper that calls get_predictions, print_classification_report,
+    Convenience wrapper that calls get_predictions, prints classification_report,
     plot_per_class_accuracy, and plot_worst_predictions in sequence.
 
     Parameters
