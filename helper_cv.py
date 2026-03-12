@@ -234,7 +234,6 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
             df["path"] = df["path"].apply(
                 lambda p: str(local_image_dir / Path(p).parent.name / Path(p).name)
             )
-        sample = train_df["path"].iloc[0]
         print(f" Paths remapped → {local_image_dir}")
         
     print(f" Splits loaded from {data_dir}")
@@ -273,9 +272,8 @@ def make_tf_dataset(
     paths,
     labels,
     split:      str,
-    num_classes: int,
     img_size:   int  = 224,
-    batch_size: int  = 32,
+    batch_size: int  = 64,
     augment:    bool = True,
     seed:       int  = 21,
 ) -> tf.data.Dataset:
@@ -283,19 +281,17 @@ def make_tf_dataset(
     Build an optimized tf.data pipeline for image classification.
 
     Handles loading, decoding, resizing, augmentation, batching,
-    and prefetching. MixUp and CutMix are applied at the batch level
-    after standard augmentation.
+    and prefetching.
 
     Parameters
     ----------
     paths       : list or array of str — absolute image file paths
     labels      : list or array of int — integer class labels
     split       : str  — 'train' | 'val' | 'test'. Controls augmentation.
-    num_classes : int  — total number of classes (needed for MixUp/CutMix)
     img_size    : int  — images are resized to (img_size, img_size). Default: 224
-    batch_size  : int  — batch size. Default: 32
+    batch_size  : int  — batch size. Default: 64
     augment     : bool — enable standard augmentation (train only). Default: True
-    seed        : int  — shuffle seed. Default: 42
+    seed        : int  — shuffle seed. Default: 21
 
     Returns
     -------
@@ -363,13 +359,8 @@ def plot_sample_images(
     """
     images, labels = next(iter(dataset))
     images = images.numpy()
-
-    # Labels may be int (normal) or float one-hot (after MixUp/CutMix)
-    if len(labels.shape) > 1:
-        label_ids = np.argmax(labels.numpy(), axis=1)
-    else:
-        label_ids = labels.numpy()
-
+    
+    label_ids = labels.numpy()
     n_show = min(n_per_row * n_rows, len(images))
 
     plt.style.use("seaborn-v0_8")
@@ -420,17 +411,17 @@ def plot_augmentation_preview(image_path: str, save_path=None) -> None:
     original = tf.image.resize_with_crop_or_pad(img, IMG_SIZE, IMG_SIZE)
     original = tf.cast(original, tf.float32) / 255.0
 
-    def augment_once(img):
+   def augment_once(img):
         img = tf.image.random_crop(img, [IMG_SIZE, IMG_SIZE, 3])
         img = tf.image.random_flip_left_right(img)
         img = tf.image.random_brightness(img, 0.2)
         img = tf.image.random_contrast(img, 0.8, 1.2)
         img = tf.image.random_saturation(img, 0.8, 1.2)
         img = tf.image.random_hue(img, 0.05)
-        return tf.cast(tf.image.resize(img, [IMG_SIZE, IMG_SIZE]) , tf.float32) / 255.0
+        return tf.cast(img, tf.float32) / 255.0
 
     n_aug = 8
-    augmented = [augment_once(tf.image.resize(img, [IMG_SIZE + 32, IMG_SIZE + 32])) for _ in range(n_aug)]
+    augmented = [augment_once(img) for _ in range(n_aug)]
 
     plt.style.use("seaborn-v0_8")
     fig, axes = plt.subplots(1, n_aug + 1, figsize=((n_aug + 1) * 2.5, 3))
@@ -515,91 +506,9 @@ def plot_training_curve(csv_path: str, save_path=None) -> None:
     plt.tight_layout()
     _save_figure(fig, save_path)
     
-def get_best_model_path(experiment_name: str) -> Path:
-    """Get best model path for any experiment without needing the trainer object."""
-    return Path(CKPT_ROOT) / PROJECT / experiment_name / f"{experiment_name}_best.keras"
-
-def compare_experiments(
-    csv_paths: dict,
-    save_path  = None
-) -> None:
-    """
-    Overlay training curves of multiple phases/experiments on a two-panel plot.
-
-    Shows both val_loss and val_accuracy side by side for all experiments,
-    so you can compare phases of the same model or different models at a glance.
-    Annotates the best value per curve on both panels.
-
-    Parameters
-    ----------
-    csv_paths : dict — {label: csv_path} e.g.
-                       {"Phase 1 — Frozen":   ".../phase1/training_log.csv",
-                        "Phase 2 — Partial":  ".../phase2/training_log.csv",
-                        "Phase 3 — Full FT":  ".../phase3/training_log.csv"}
-    save_path : str or Path, optional
-
-    Returns
-    -------
-    None
-
-    Example
-    -------
-    >>> compare_experiments({
-    ...     "Phase 1 — Frozen":  CKPT_ROOT / PROJECT / "phase1" / "training_log.csv",
-    ...     "Phase 2 — Partial": CKPT_ROOT / PROJECT / "phase2" / "training_log.csv",
-    ...     "Phase 3 — Full FT": CKPT_ROOT / PROJECT / "phase3" / "training_log.csv",
-    ... }, save_path=PLOTS_DIR / "phase_comparison.png")
-    """
-    plt.style.use("seaborn-v0_8")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
-
-    colors = ["#3498db", "#e67e22", "#2ecc71", "#9b59b6", "#e74c3c"]
-
-    for i, (label, csv_path) in enumerate(csv_paths.items()):
-        df     = pd.read_csv(csv_path).reset_index(drop=True)
-        epochs = df.index
-        color  = colors[i % len(colors)]
-
-        # ── Loss panel ────────────────────────────────────────
-        ax1.plot(epochs, df["val_loss"], linewidth=2, label=label, color=color)
-        best_loss_epoch = df["val_loss"].idxmin()
-        best_loss_val   = df["val_loss"].iloc[best_loss_epoch]
-        ax1.scatter(best_loss_epoch, best_loss_val, s=80, color=color, zorder=5)
-        ax1.annotate(
-            f"{best_loss_val:.4f}",
-            xy=(best_loss_epoch, best_loss_val),
-            xytext=(5, 5), textcoords="offset points",
-            fontsize=8, color=color
-        )
-
-        # ── Accuracy panel ────────────────────────────────────
-        ax2.plot(epochs, df["val_accuracy"], linewidth=2, label=label, color=color)
-        best_acc_epoch = df["val_accuracy"].idxmax()
-        best_acc_val   = df["val_accuracy"].iloc[best_acc_epoch]
-        ax2.scatter(best_acc_epoch, best_acc_val, s=80, color=color, zorder=5)
-        ax2.annotate(
-            f"{best_acc_val:.4f}",
-            xy=(best_acc_epoch, best_acc_val),
-            xytext=(5, -12), textcoords="offset points",
-            fontsize=8, color=color
-        )
-
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Validation Loss")
-    ax1.set_title("Val Loss — Phase Comparison")
-    ax1.legend()
-    ax1.grid(True, alpha=0.4)
-
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Validation Accuracy")
-    ax2.set_title("Val Accuracy — Phase Comparison")
-    ax2.legend()
-    ax2.grid(True, alpha=0.4)
-
-    plt.suptitle("All Phases Comparison", fontsize=13)
-    plt.tight_layout()
-    _save_figure(fig, save_path)
-
+def get_best_model_path(ckpt_root, project: str, experiment_name: str) -> Path:
+    return Path(ckpt_root) / project / experiment_name / f"{experiment_name}_best.keras"
+    
 
 # ─────────────────────────────────────────────
 # 5. Evaluation
@@ -627,23 +536,19 @@ def get_predictions(model, dataset, num_classes: int) -> tuple:
     -------
     >>> y_true, y_pred, y_probs = get_predictions(model, test_ds, NUM_CLASSES)
     """
-    y_true_list = []
-    for _, labels in dataset:
+    y_true_list  = []
+    y_probs_list = []
+
+    for images, labels in dataset:
         if len(labels.shape) > 1:
             y_true_list.append(np.argmax(labels.numpy(), axis=1))
         else:
             y_true_list.append(labels.numpy())
+        y_probs_list.append(model.predict(images, verbose=0))
 
-    y_true       = np.concatenate(y_true_list, axis=0)
-    y_pred_probs = model.predict(dataset, verbose=1)
+    y_true       = np.concatenate(y_true_list,  axis=0)
+    y_pred_probs = np.concatenate(y_probs_list, axis=0)
     y_pred       = np.argmax(y_pred_probs, axis=1)
-
-    # Trim to same length (drop_remainder may cause mismatch)
-    min_len      = min(len(y_true), len(y_pred))
-    y_true       = y_true[:min_len]
-    y_pred       = y_pred[:min_len]
-    y_pred_probs = y_pred_probs[:min_len]
-
     # Top-1
     top1 = np.mean(y_true == y_pred)
 
@@ -655,7 +560,6 @@ def get_predictions(model, dataset, num_classes: int) -> tuple:
     print(f" Top-5 Accuracy : {top5:.4f} ({top5*100:.2f}%)\n")
 
     return y_true, y_pred, y_pred_probs
-
 
 def evaluate_model(
     model,
@@ -942,13 +846,18 @@ def grad_cam(
     try:
         conv_layer = model.get_layer(layer_name)
     except ValueError:
-        print(f" Layer '{layer_name}' not found — falling back to last Conv2D layer.")
+        print(f" Layer '{layer_name}' not found — falling back to last Conv2D/DepthwiseConv2D layer.")
         conv_layer = next(
-            l for l in reversed(model.layers)
-            if isinstance(l, tf.keras.layers.Conv2D)
+            (l for l in reversed(model.layers)
+            if isinstance(l, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D))),
+            None
         )
+        if conv_layer is None:
+            raise ValueError(
+                "No Conv2D or DepthwiseConv2D layer found in model for Grad-CAM fallback."
+            )
         print(f" Using layer: {conv_layer.name}")
-
+    
     # Build a sub-model that outputs (conv feature maps, final logits)
     grad_model = tf.keras.Model(
         inputs  = model.inputs,
