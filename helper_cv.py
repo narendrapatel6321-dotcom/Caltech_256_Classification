@@ -9,7 +9,7 @@ Functions
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
     make_tf_dataset(paths, labels, split, img_size, batch_size, augment)
-    plot_sample_images(dataset, class_names, n_per_row, save_path)
+    plot_sample_images(dataset, class_names, n_per_row, n_rows, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
     get_predictions(model, dataset, num_classes)
@@ -300,7 +300,7 @@ def make_tf_dataset(
     -------
     >>> train_ds = make_tf_dataset(
     ...     train_df["path"].values, train_df["label"].values,
-    ...     split="train", num_classes=NUM_CLASSES,
+    ...     split="train",
     ...     img_size=IMG_SIZE, batch_size=BATCH_SIZE
     ... )
     """
@@ -408,7 +408,7 @@ def plot_augmentation_preview(image_path: str, save_path=None) -> None:
     original = tf.image.resize_with_crop_or_pad(img, IMG_SIZE, IMG_SIZE)
     original = tf.cast(original, tf.float32) / 255.0
 
-   def augment_once(img):
+    def augment_once(img):
         img = tf.image.random_crop(img, [IMG_SIZE, IMG_SIZE, 3])
         img = tf.image.random_flip_left_right(img)
         img = tf.image.random_brightness(img, 0.2)
@@ -438,7 +438,7 @@ def plot_augmentation_preview(image_path: str, save_path=None) -> None:
 
 
 # ─────────────────────────────────────────────
-# 4. Training analysis
+# 3. Training analysis
 # ─────────────────────────────────────────────
 
 def plot_training_curve(csv_path: str, save_path=None) -> None:
@@ -508,7 +508,7 @@ def get_best_model_path(ckpt_root, project: str, experiment_name: str) -> Path:
     
 
 # ─────────────────────────────────────────────
-# 5. Evaluation
+# 4. Evaluation
 # ─────────────────────────────────────────────
 
 def get_predictions(model, dataset, num_classes: int) -> tuple:
@@ -797,7 +797,7 @@ def plot_worst_predictions(
     _save_figure(fig, save_path)
 
 # ─────────────────────────────────────────────
-# 6. Grad-CAM
+# 5. Grad-CAM
 # ─────────────────────────────────────────────
 
 def grad_cam(
