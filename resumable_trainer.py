@@ -19,6 +19,7 @@ from datetime import datetime
 import hashlib
 import gc
 import re
+import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.callbacks import (
     ModelCheckpoint, EarlyStopping, CSVLogger, Callback
@@ -90,6 +91,7 @@ class TrainingStateCallback(Callback):
         self.mode = mode
         self.state = {}
         self.early_stopping_cb = early_stopping_cb
+        self._first_epoch_done = False
 
     def set_state(self, state: dict):
         """Load existing state (called before training begins)."""
@@ -100,7 +102,7 @@ class TrainingStateCallback(Callback):
         current_val = logs.get(self.monitor, None)
 
         # Update best val metric
-        if current_val is not None:
+        if current_val is not None and self._first_epoch_done :
             best = self.state.get('best_val_metric', None)
             if best is None:
                 self.state['best_val_metric'] = float(current_val)
@@ -132,6 +134,7 @@ class TrainingStateCallback(Callback):
                 )
             except AttributeError:
                 pass  
+        self._first_epoch_done = True
         self._atomic_save()
 
     def on_train_end(self, logs=None):
@@ -297,6 +300,24 @@ class ResumableTrainer:
         config = model.to_json()
         return hashlib.md5(config.encode()).hexdigest()
         
+    def _is_schedule(self, optimizer) -> bool:
+        """Return True if the optimizer uses an LR schedule instead of a fixed value."""
+        return isinstance(
+            optimizer.learning_rate,
+            tf.keras.optimizers.schedules.LearningRateSchedule
+        )
+        
+    def _prompt_user(self, message: str) -> str:
+        """
+            Prompt the user for y/n input. Used for interactive resume checks.
+            Loops until a valid response is given.
+        """
+        while True:
+            response = input(message).strip().lower()
+            if response in ('y', 'n'):
+                return response
+            print("  Please enter 'y' or 'n'.")
+            
     def _load_state(self) -> dict:
         """Load training state from JSON if it exists."""
         # Clean up any abandoned .tmp file from a previous crash
@@ -365,9 +386,31 @@ class ResumableTrainer:
             print(" All epoch checkpoints corrupted — checking for best model fallback...")
 
         if self.best_model_path.exists() and self.best_model_path.stat().st_size > 1024:
-            last_epoch = self.state.get('best_epoch', self.state.get('last_epoch', 0))
-            print(f" Falling back to best model checkpoint (epoch ~{last_epoch})")
-            return str(self.best_model_path), last_epoch
+            last_epoch = self.state.get('last_epoch', 0)
+            best_epoch = self.state.get('best_epoch', last_epoch)
+            lost_epochs = last_epoch - best_epoch
+
+            if lost_epochs > 0 and self.csv_log_path.exists():
+                try:
+                    df = pd.read_csv(self.csv_log_path)
+                    df = df[df['epoch'] < best_epoch]
+                    df.to_csv(self.csv_log_path, index=False)
+                    print(
+                        f" Falling back to best model checkpoint (epoch {best_epoch}).\n"
+                        f" Removed {lost_epochs} orphaned epoch(s) from training_log.csv "
+                        f"(epochs {best_epoch + 1}–{last_epoch})."
+                        )
+                except Exception as e:
+                    print(
+                        f" Falling back to best model checkpoint (epoch {best_epoch}).\n"
+                        f" WARNING: Could not truncate training_log.csv — {e}\n"
+                        f" Training curve may show a backwards jump for "
+                        f"epochs {best_epoch + 1}–{last_epoch}."
+                    )
+            else:
+                print(f" Falling back to best model checkpoint (epoch {best_epoch}).")
+
+            return str(self.best_model_path), best_epoch
 
         print(" No valid checkpoints found — starting from scratch")
         return None, 0
@@ -484,55 +527,125 @@ class ResumableTrainer:
             self.model = tf.keras.models.load_model(latest_ckpt)
             temp_model = self.model_fn()
             try :
+                
                 saved_hash = self.state.get('architecture_hash')
-                if saved_hash:
-                    current_hash = self._get_architecture_hash(model = temp_model)
+                if not saved_hash:
+                    print(
+                        " WARNING: Architecture hash missing from state — "
+                        "hash check skipped. This can happen if training crashed "
+                        "before the first epoch completed or if state was corrupted."
+                        )
+                else:
+                    current_hash = self._get_architecture_hash(model=temp_model)
+                    
                     if saved_hash != current_hash:
                         raise RuntimeError(
-                        "Model architecture has changed since the last checkpoint!\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch." )
-   
+                        f"Model architecture has changed since the last checkpoint.\n"
+                        f"  Saved hash   : {saved_hash}\n"
+                        f"  Current hash : {current_hash}\n"
+                        f"  This means a layer, filter count, or backbone changed in model_fn.\n"
+                        f"  If intentional, delete the checkpoint directory and retrain:\n"
+                        f"    {self.ckpt_dir}"
+                        )
+
                 # Hard errors
                 if type(temp_model.optimizer).__name__ != self.state.get('optimizer'):
                     raise RuntimeError(
-                        f"Optimizer changed since last checkpoint: "
-                        f"{self.state.get('optimizer')} -> {type(temp_model.optimizer).__name__}\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch."
-                        )
-                if temp_model.loss != self.state.get('loss'):
-                    raise RuntimeError(
-                        f"Loss function changed since last checkpoint: "
-                        f"{self.state.get('loss')} -> {temp_model.loss}\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch."
-                        )
-                new_metrics = temp_model.metrics_names
-                if new_metrics != self.state.get('metrics'):
-                    raise RuntimeError(
-                        f"Metrics changed since last checkpoint: "
-                        f"{self.state.get('metrics')} -> {new_metrics}\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch."
-                        )
-                if self.monitor != self.state.get('monitor'):
-                    raise RuntimeError(
-                        f"Monitor metric changed since last checkpoint: "
-                        f"{self.state.get('monitor')} -> {self.monitor}\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch."
-                        )
-                if self.mode != self.state.get('mode'):
-                    raise RuntimeError(
-                        f"Mode changed since last checkpoint: "
-                        f"{self.state.get('mode')} -> {self.mode}\n"
-                        "If intentional, delete the checkpoint directory and retrain from scratch."
+                        f"Optimizer changed since last checkpoint.\n"
+                        f"  saved   : {self.state.get('optimizer')}\n"
+                        f"  current : {type(temp_model.optimizer).__name__}\n"
+                        f"  Optimizer state is incompatible with the saved checkpoint.\n"
+                        f"  If intentional, delete the checkpoint directory and retrain:\n"
+                        f"    {self.ckpt_dir}"
                         )
                 
-                # Warn + auto-apply
-                new_lr = float(temp_model.optimizer.learning_rate)
-                old_lr = float(self.model.optimizer.learning_rate)
-                if new_lr != old_lr:
-                    print(f"Learning rate changed: {old_lr} -> {new_lr}. Applying new LR.")
-                    self.model.optimizer.learning_rate.assign(new_lr)
-                    self.state['learning_rate'] = new_lr 
+                current_loss = type(temp_model.loss).__name__ if not isinstance(
+                        temp_model.loss, str) else temp_model.loss
+                saved_loss   = self.state.get('loss', '')
 
+                if current_loss != saved_loss:
+                        response = self._prompt_user(
+                            f"Loss changed since last checkpoint:\n"
+                            f"  saved   : {saved_loss}\n"
+                            f"  current : {current_loss}\n"
+                            f"Loss change won't affect weight compatibility but will affect "
+                            f"training behavior.\n"
+                            f"Continue with new loss? [y/n]: "
+                        )
+                        if response == 'y':
+                            self.state['loss'] = current_loss
+                            print(f" Continuing with new loss: {current_loss}")
+                        else:
+                            raise RuntimeError(
+                                f"Loss change rejected. Update your model_fn to restore "
+                                f"'{saved_loss}' and try again."
+                            )
+    
+                new_metrics = temp_model.metrics_names
+                if new_metrics != self.state.get('metrics'):
+                        if self.monitor not in new_metrics:
+                            raise RuntimeError(
+                                f"Metrics changed and monitor metric '{self.monitor}' is no longer present.\n"
+                                f"  saved   : {self.state.get('metrics')}\n"
+                                f"  current : {new_metrics}\n"
+                                f"Restore '{self.monitor}' in your model_fn metrics or update monitor.\n"
+                                f"  checkpoint dir: {self.ckpt_dir}"
+                                )
+                        response = self._prompt_user(
+                            f"Metrics changed since last checkpoint:\n"
+                            f"  saved   : {self.state.get('metrics')}\n"
+                            f"  current : {new_metrics}\n"
+                            f"Monitor '{self.monitor}' is still present. "
+                            f"Continue with new metrics? [y/n]: "
+                            )
+                        if response == 'y':
+                            self.state['metrics'] = new_metrics
+                            print(f" Continuing with new metrics: {new_metrics}")
+                        else:
+                            raise RuntimeError(
+                                f"Metrics change rejected. Restore original metrics in "
+                                f"your model_fn and try again."
+                                )
+                    
+                monitor_changed = self.monitor != self.state.get('monitor')
+                mode_changed    = self.mode    != self.state.get('mode')
+                if monitor_changed or mode_changed:
+                    changes = []
+                    if monitor_changed:
+                        changes.append(
+                        f"  monitor : {self.state.get('monitor')} → {self.monitor}"
+                        )
+                    if mode_changed:
+                        changes.append(
+                        f"  mode    : {self.state.get('mode')} → {self.mode}"
+                        )
+                    raise RuntimeError(
+                        f"Monitor/mode changed since last checkpoint:\n"
+                        + "\n".join(changes) + "\n"
+                        f"If intentional, delete the checkpoint directory and retrain from scratch:\n"
+                        f"  {self.ckpt_dir}"
+                        )
+                # LR check — skip entirely if either optimizer uses a schedule
+                if self._is_schedule(temp_model.optimizer) or self._is_schedule(self.model.optimizer):
+                    print(" LR schedule detected — skipping LR drift check. Schedule restored from checkpoint.")
+                else:
+                    new_lr = float(temp_model.optimizer.learning_rate)
+                    old_lr = float(self.model.optimizer.learning_rate)
+                    if new_lr != old_lr:
+                        response = self._prompt_user(
+                            f"LR changed since last checkpoint:\n"
+                            f"  saved   : {old_lr}\n"
+                            f"  current : {new_lr}\n"
+                            f"Keep previous LR ({old_lr})? [y/n]: "
+                            )
+                        if response == 'y':
+                            self.model.optimizer.learning_rate.assign(old_lr)
+                            print(f" Keeping previous LR: {old_lr}")
+                        else:
+                            self.model.optimizer.learning_rate.assign(new_lr)
+                            self.state['learning_rate'] = new_lr
+                            print(f" Applying new LR: {new_lr}")
+                
                 if self.patience != self.state.get('patience'):
                     print(f"Patience changed: {self.state.get('patience')} -> {self.patience}. Applying.")
                     self.state['patience'] = self.patience
@@ -540,8 +653,14 @@ class ResumableTrainer:
                 if self.save_freq != self.state.get('save_freq'):
                     print(f"Save frequency changed: {self.state.get('save_freq')} -> {self.save_freq}. Applying.")
                     self.state['save_freq'] = self.save_freq
+                    
+            except Exception : 
+                self.model = None
+                self.initial_epoch = 0
                 
+            else :
                 self.initial_epoch = resume_epoch
+                
             finally : 
                 del temp_model
                 gc.collect()
@@ -550,13 +669,17 @@ class ResumableTrainer:
             self.model = self.model_fn()
             self.state['architecture_hash'] = self._get_architecture_hash(model=self.model)
             self.state['optimizer'] = type(self.model.optimizer).__name__
-            self.state['loss'] = self.model.loss
+            self.state['loss'] = type(self.model.loss).__name__ if not isinstance(
+                                        self.model.loss, str) else self.model.loss
             self.state['metrics'] = self.model.metrics_names
             self.state['monitor'] = self.monitor
             self.state['mode'] = self.mode
             self.state['patience'] = self.patience
             self.state['save_freq'] = self.save_freq
-            self.state['learning_rate'] = float(self.model.optimizer.learning_rate)
+            self.state['learning_rate'] = (
+                    None if self._is_schedule(self.model.optimizer)
+                    else float(self.model.optimizer.learning_rate)
+                    )
             self.initial_epoch = 0
             self._save_state()
 
@@ -597,12 +720,28 @@ class ResumableTrainer:
         if self.best_model_path.exists():
             print(f" Loading best model from {self.best_model_path}")
             return tf.keras.models.load_model(str(self.best_model_path))
-        else:
-            raise FileNotFoundError(f"No best model found at {self.best_model_path}")
+    
+        # Give a more informative error depending on context
+        if not self.state and not self.state_path.exists():
+            raise FileNotFoundError(
+                f"No checkpoint directory found for experiment '{self.experiment_name}'.\n"
+                f"  Expected path : {self.best_model_path}\n"
+                f"  Possible causes:\n"
+                f"    - fit() has never been called for this experiment\n"
+                f"    - Wrong experiment_name — double check spelling\n"
+                f"    - Google Drive is not mounted or not synced"
+            )
+        raise FileNotFoundError(
+            f"No best model found at {self.best_model_path}\n"
+            f"  Training has run for this experiment but no best model was saved.\n"
+            f"  Possible causes:\n"
+            f"    - Training crashed before the first epoch completed\n"
+            f"    - Monitor metric '{self.monitor}' was never logged"
+        )
 
     def get_training_summary(self) -> dict:
         """Print and return the current training state."""
-        state = self._load_state()
+        state = self.state if self.state else self._load_state()
         print("\n── Training Summary ──────────────────────")
         for k, v in state.items():
             print(f"  {k}: {v}")
