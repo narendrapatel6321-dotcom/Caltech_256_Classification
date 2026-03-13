@@ -102,7 +102,7 @@ class TrainingStateCallback(Callback):
         current_val = logs.get(self.monitor, None)
 
         # Update best val metric
-        if current_val is not None and self._first_epoch_done :
+        if current_val is not None :
             best = self.state.get('best_val_metric', None)
             if best is None:
                 self.state['best_val_metric'] = float(current_val)
@@ -118,7 +118,7 @@ class TrainingStateCallback(Callback):
                     self.state['patience_counter'] = 0
                     self.state['best_epoch'] = epoch + 1
                 else:
-                    if self.early_stopping_cb is not None:
+                    if self.early_stopping_cb is not None and self._first_epoch_done:
                         self.state['patience_counter'] = int(self.early_stopping_cb.wait)
                     else:
                         self.state['patience_counter'] = self.state.get('patience_counter', 0) + 1
@@ -647,16 +647,37 @@ class ResumableTrainer:
                             print(f" Applying new LR: {new_lr}")
                 
                 if self.patience != self.state.get('patience'):
-                    print(f"Patience changed: {self.state.get('patience')} -> {self.patience}. Applying.")
-                    self.state['patience'] = self.patience
+                    response = self._prompt_user(
+                    f"Patience changed since last checkpoint:\n"
+                    f"  saved   : {self.state.get('patience')}\n"
+                    f"  current : {self.patience}\n"
+                    f"Apply new patience? [y/n]: "
+                    )
+                    if response == 'y':
+                        self.state['patience'] = self.patience
+                        print(f" Applying new patience: {self.patience}")
+                    else:
+                        self.patience = self.state.get('patience')
+                        print(f" Keeping previous patience: {self.patience}")
 
                 if self.save_freq != self.state.get('save_freq'):
-                    print(f"Save frequency changed: {self.state.get('save_freq')} -> {self.save_freq}. Applying.")
-                    self.state['save_freq'] = self.save_freq
-                    
+                    response = self._prompt_user(
+                    f"Save frequency changed since last checkpoint:\n"
+                    f"  saved   : {self.state.get('save_freq')}\n"
+                    f"  current : {self.save_freq}\n"
+                    f"Apply new save frequency? [y/n]: "
+                    )
+                    if response == 'y':
+                        self.state['save_freq'] = self.save_freq
+                        print(f" Applying new save frequency: {self.save_freq}")
+                    else:
+                        self.save_freq = self.state.get('save_freq')
+                        print(f" Keeping previous save frequency: {self.save_freq}")
+                        
             except Exception : 
                 self.model = None
                 self.initial_epoch = 0
+                raise
                 
             else :
                 self.initial_epoch = resume_epoch
