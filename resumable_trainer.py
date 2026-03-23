@@ -662,10 +662,16 @@ class ResumableTrainer:
                             f"Keep previous LR ({old_lr})? [y/n]: "
                             )
                         if response == 'y':
-                            self.model.optimizer.learning_rate.assign(old_lr)
-                            print(f" Keeping previous LR: {old_lr}")
+                            if hasattr(self.model.optimizer.learning_rate, 'assign'):
+                                self.model.optimizer.learning_rate.assign(old_lr)
+                            else:
+                                self.model.optimizer.learning_rate = old_lr
+                                print(f" Keeping previous LR: {old_lr}")
                         else:
-                            self.model.optimizer.learning_rate.assign(new_lr)
+                            if hasattr(self.model.optimizer.learning_rate, 'assign'):
+                                self.model.optimizer.learning_rate.assign(new_lr)
+                            else:
+                                self.model.optimizer.learning_rate = new_lr
                             self.state['learning_rate'] = new_lr
                             print(f" Applying new LR: {new_lr}")
                 
