@@ -299,13 +299,36 @@ class ResumableTrainer:
             raise ValueError("_get_architecture_hash() requires an explicit model argument.")
         config = model.to_json()
         return hashlib.md5(config.encode()).hexdigest()
+    def _get_architecture_hash(self, model) -> str:
+        """
+        Generates a stable MD5 hash of the model structure to detect architectural changes.
+    
+        Strips non-deterministic metadata such as auto-incremented layer names to 
+        ensure the hash remains consistent across different Keras 3 sessions.
+        """
+        structural_identity = []
+        for layer in model.layers:
+            config = layer.get_config().copy()
+            config.pop('name', None)
+            structural_identity.append((type(layer).__name__, config))
+            
+        serialized_structure = str(structural_identity)
+        return hashlib.md5(serialized_structure.encode()).hexdigest()
         
     def _is_schedule(self, optimizer) -> bool:
-        """Return True if the optimizer uses an LR schedule instead of a fixed value."""
-        return isinstance(
-            optimizer.learning_rate,
-            tf.keras.optimizers.schedules.LearningRateSchedule
-        )
+        """
+        Checks if the optimizer LR is a schedule or a non-assignable tensor.
+        
+        This captures both fresh schedules and those deserialized as static 
+        EagerTensors during a checkpoint resume.
+        """
+        lr = optimizer.learning_rate
+
+        if isinstance(lr, tf.keras.optimizers.schedules.LearningRateSchedule):
+            return True
+        if isinstance(lr, tf.Tensor) and not isinstance(lr, tf.Variable):
+            return True   
+        return False
         
     def _prompt_user(self, message: str) -> str:
         """
