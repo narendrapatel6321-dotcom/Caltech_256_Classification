@@ -187,7 +187,33 @@ class StatefulEarlyStopping(EarlyStopping):
                 self.best_weights = self.model.get_weights()
             print(f" EarlyStopping restored — best={self.best:.4f}, patience_counter={self.wait}")
 
+# ─────────────────────────────────────────────
+# Stateful ModelCheckpoint
+# ─────────────────────────────────────────────
 
+class StatefulModelCheckpoint(ModelCheckpoint):
+    """
+    ModelCheckpoint that restores its internal best value on resume,
+    preventing the first epoch from always saving unconditionally.
+
+    The problem: on resume, the standard ModelCheckpoint initialises
+    best to None/inf regardless of prior training, so the first epoch
+    always triggers a save even if it's worse than the previous best.
+
+    The fix: restore best from saved state in on_train_begin, exactly
+    as StatefulEarlyStopping does for its own best value.
+    """
+
+    def __init__(self, saved_best=None, **kwargs):
+        super().__init__(**kwargs)
+        self._saved_best = saved_best
+
+    def on_train_begin(self, logs=None):
+        super().on_train_begin(logs)
+        if self._saved_best is not None:
+            self.best = self._saved_best
+            print(f" ModelCheckpoint restored — best={self.best:.4f}")
+            
 # ─────────────────────────────────────────────
 # Safe CSV Logger
 # ─────────────────────────────────────────────
@@ -441,16 +467,15 @@ class ResumableTrainer:
     def _build_callbacks(self) -> list:
         """Build all callbacks with restored state."""
         callbacks = []
-
-        # 1. Best model checkpoint
-        callbacks.append(ModelCheckpoint(
+        # 1. Best model checkpoint — restored best prevents false save on resume
+        callbacks.append(StatefulModelCheckpoint(
             filepath=str(self.best_model_path),
             monitor=self.monitor,
             save_best_only=True,
             mode=self.mode,
-            verbose=1
+            verbose=1,
+            saved_best=self.state.get('best_val_metric', None)
         ))
-
         # 2. Per-epoch checkpoint
         callbacks.append(ModelCheckpoint(
             filepath=self.epoch_template,
