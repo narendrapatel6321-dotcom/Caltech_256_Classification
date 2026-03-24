@@ -256,6 +256,48 @@ class SafeCSVLogger(CSVLogger):
         self._strip_duplicate_headers(Path(self.filename))
         super().on_train_begin(logs)
 
+# ─────────────────────────────────────────────
+# Rolling Checkpoint Cleaner
+# ─────────────────────────────────────────────
+
+class RollingCheckpointCleaner(Callback):
+    """
+    Deletes older per-epoch checkpoints after each epoch, keeping only
+    the last `keep` files. Prevents unbounded Drive storage growth for
+    long training runs with large models.
+
+    Never deletes the best model checkpoint — only per-epoch checkpoints
+    matching the epoch_NNNN.keras naming pattern.
+
+    Args:
+        ckpt_dir        : Path — experiment checkpoint directory
+        experiment_name : str  — experiment name prefix used in filenames
+        keep            : int  — number of most recent epoch checkpoints to keep
+        best_model_path : Path — path to best model, always excluded from deletion
+    """
+
+    def __init__(self, ckpt_dir, experiment_name, keep=3, best_model_path=None):
+        super().__init__()
+        self.ckpt_dir = Path(ckpt_dir)
+        self.experiment_name = experiment_name
+        self.keep = keep
+        self.best_model_path = str(best_model_path) if best_model_path else None
+
+    def on_epoch_end(self, epoch, logs=None):
+        pattern = str(self.ckpt_dir / f"{self.experiment_name}_epoch_*.keras")
+        files = sorted(
+            glob.glob(pattern),
+            key=lambda f: int(re.search(r'_epoch_(\d+)\.keras$', f).group(1))
+        )
+        to_delete = [
+            f for f in files[:-self.keep]
+            if f != self.best_model_path
+        ]
+        for f in to_delete:
+            try:
+                Path(f).unlink()
+            except OSError:
+                pass
 
 # ─────────────────────────────────────────────
 # Core ResumableTrainer
@@ -293,6 +335,7 @@ class ResumableTrainer:
         mode: str = "max",
         patience: int = 7,
         save_freq="epoch",
+        keep_checkpoints: int = 3
     ):
         self.experiment_name = experiment_name
         self.model_fn = model_fn
@@ -300,6 +343,7 @@ class ResumableTrainer:
         self.mode = mode
         self.patience = patience
         self.save_freq = save_freq
+        self.keep_checkpoints = keep_checkpoints
 
         # Directory setup
         self.ckpt_dir = Path(checkpoint_root) / project_name / experiment_name
@@ -483,8 +527,16 @@ class ResumableTrainer:
             save_best_only=False,
             verbose=0
         ))
+
+        # 3. Rolling checkpoint cleaner — keeps last keep_checkpoints, deletes older
+        callbacks.append(RollingCheckpointCleaner(
+            ckpt_dir        = self.ckpt_dir,
+            experiment_name = self.experiment_name,
+            keep            = self.keep_checkpoints,
+            best_model_path = self.best_model_path
+        ))
         
-        # 3. Stateful EarlyStopping (restores patience counter)
+        # 4. Stateful EarlyStopping (restores patience counter)
         early_stopping = StatefulEarlyStopping(
             monitor=self.monitor,
             patience=self.patience,
@@ -497,13 +549,13 @@ class ResumableTrainer:
         )
         callbacks.append(early_stopping)
 
-        # 4. Safe CSV Logger 
+        # 5. Safe CSV Logger 
         callbacks.append(SafeCSVLogger(
             filename=str(self.csv_log_path),
             append=True
         ))
 
-        # 5. Training state saver — receives reference to EarlyStopping
+        # 6. Training state saver — receives reference to EarlyStopping
         state_cb = TrainingStateCallback(
             state_path=self.state_path,
             monitor=self.monitor,
