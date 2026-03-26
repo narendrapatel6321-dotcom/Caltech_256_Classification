@@ -8,7 +8,7 @@ Functions
 ---------
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
-    make_tf_dataset(paths, labels, split, img_size, batch_size, augment)
+    make_tf_dataset(paths, labels, split, img_size, batch_size, augment, seed)
     plot_sample_images(dataset, class_names, n_per_row, n_rows, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
@@ -82,8 +82,9 @@ def download_and_prepare_dataset(data_dir: str) -> None:
         - Iterates every class folder in 256_ObjectCategories
         - Skips the clutter class (257th folder: '257.clutter')
         - Shuffles images per class with a fixed seed for reproducibility
-        - Fixed 46 train / 9 val / 9 test per class (stratified & balanced)
-        - Minimum class requirement: 64 images (galaxy has 64, safe)
+        -  Uses 9 val / 9 test per class (fixed)
+        - Train set size is dynamic: up to 100 images per class,
+              depending on available images after val/test split
         - Classes with more images simply have extras unused
 
     Files saved to data_dir:
@@ -205,6 +206,9 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     ----------
     data_dir : str or Path
         Directory containing train.csv, val.csv, test.csv, class_names.txt.
+    local_image_dir : str or Path, optional
+        If provided, rewrites all image paths to point to a local directory
+        while preserving class subfolder structure.
 
    Returns
    -------
@@ -221,7 +225,7 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
 
     Example
     -------
-    >>> train_df, val_df, test_df, class_names = load_saved_splits(DATA_DIR)
+    >>> train_df, val_df, test_df, class_names, class_weights = load_saved_splits(DATA_DIR)
     """
     data_dir = Path(data_dir)
     needed   = ["train.csv", "val.csv", "test.csv", "class_names.txt"]
@@ -334,8 +338,13 @@ def setup_kaggle_data(
 
 def _load_and_preprocess(path, label, img_size, split):
     """
-    Read an image from disk, decode, resize and normalize it.
-    Training images get random augmentation; val/test get only resize + normalize.
+    Read an image from disk, decode, resize and cast to float32 (no normalization applied)
+    Training images receive random augmentation including:
+        - random crop
+        - horizontal flip
+        - rotation
+        - brightness / contrast / saturation / hue adjustments
+    val/test get only resize 
     """
     img = tf.io.read_file(path)
     img = tf.image.decode_jpeg(img, channels=3)
