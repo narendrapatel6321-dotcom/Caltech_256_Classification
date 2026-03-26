@@ -73,7 +73,8 @@ def _save_figure(fig, save_path):
 
 def download_and_prepare_dataset(data_dir: str) -> None:
     """
-    Download Caltech-256, extract it, split into train/val/test (70/15/15),
+    Download Caltech-256, extract it, split into train/val/test with fixed 9 val / 9 test images per class,
+        and up to 100 train images per class (dynamic, depends on class size).
     and save three CSV manifest files (image path + label) to data_dir.
 
     Run this ONCE. All subsequent sessions should use load_saved_splits().
@@ -89,7 +90,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
 
     Files saved to data_dir:
         train.csv, val.csv, test.csv
-        Each CSV has two columns: 'path' (absolute str), 'label' (int 0-255)
+        Each CSV has two columns: 'path' (absolute str), 'label' (int 0–255, assigned sequentially to 256 non-clutter classes)
         class_names.txt — one class name per line, index = label
 
     Parameters
@@ -181,7 +182,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     # Per-class train size distribution summary
     train_df_temp  = pd.DataFrame(train_rows)
     counts         = train_df_temp.groupby("label").size()
-    tiny           = (counts < 62).sum()   # below 80-image classes (galaxy tier)
+    tiny           = (counts < 62).sum()   
     mid            = ((counts >= 62) & (counts < 100)).sum()
     capped         = (counts == 100).sum()
 
@@ -392,7 +393,8 @@ def make_tf_dataset(
     Returns
     -------
     tf.data.Dataset yielding (images, labels) batches.
-        - images shape : (batch_size, img_size, img_size, 3), float32, range [0, 1]
+        - images shape : (batch_size, img_size, img_size, 3), float32, range [0, 255]
+                        (normalization is handled by the model's preprocessing layer)
         - labels shape : (batch_size,) int  
 
     Example
