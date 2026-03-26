@@ -9,7 +9,7 @@ Functions
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
     setup_kaggle_data(kaggle_json_path, kaggle_dataset:  str, local_dir:       str = "/content/caltech256",)
-    make_tf_dataset(paths, labels, split, img_size, batch_size, augment, seed)
+    make_tf_dataset(paths, labels, split, img_size, batch_size, augment, seed, class_weights)
     plot_sample_images(dataset, class_names, n_per_row, n_rows, save_path)
     plot_augmentation_preview(image_path, save_path)
     plot_training_curve(csv_path, save_path)
