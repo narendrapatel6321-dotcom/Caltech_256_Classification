@@ -6,9 +6,9 @@ and interpretability.
 
 Functions
 ---------
-    download_and_prepare_dataset(data_dir)
+    download_data(kaggle_json_path, kaggle_dataset:  str, local_dir)
+    prepare_dataset_split(local_dir,save_dir)
     load_saved_splits(data_dir)
-    setup_kaggle_data(kaggle_json_path, kaggle_dataset:  str, local_dir:       str = "/content/caltech256",)
     make_tf_dataset(paths, labels, split, img_size, batch_size, augment, seed, class_weights)
     plot_sample_images(dataset, class_names, n_per_row, n_rows, save_path)
     plot_augmentation_preview(image_path, save_path)
@@ -72,83 +72,101 @@ def _save_figure(fig, save_path):
 # 1. Dataset preparation
 # ─────────────────────────────────────────────
 
-def download_and_prepare_dataset(data_dir: str) -> None:
+def download_data(
+    kaggle_json_path,
+    kaggle_dataset:  str,
+    local_dir:       str = "/content/caltech256",
+) -> Path:
     """
-    Download Caltech-256, extract it, split into train/val/test with fixed 9 val / 9 test images per class,
-        and up to 100 train images per class (dynamic, depends on class size).
-    and save three CSV manifest files (image path + label) to data_dir.
+    Authenticate Kaggle, download dataset zip to local_dir,
+    extract it, and return the path to 256_ObjectCategories.
 
-    Run this ONCE. All subsequent sessions should use load_saved_splits().
-
-    Split strategy:
-        - Iterates every class folder in 256_ObjectCategories
-        - Skips the clutter class (257th folder: '257.clutter')
-        - Shuffles images per class with a fixed seed for reproducibility
-        -  Uses 9 val / 9 test per class (fixed)
-        - Train set size is dynamic: up to 100 images per class,
-              depending on available images after val/test split
-        - Classes with more images simply have extras unused
-
-    Files saved to data_dir:
-        train.csv, val.csv, test.csv
-        Each CSV has two columns: 'path' (absolute str), 'label' (int 0–255, assigned sequentially to 256 non-clutter classes)
-        class_names.txt — one class name per line, index = label
+    Safe to call every session — skips download if already extracted.
 
     Parameters
     ----------
-    data_dir : str or Path
-        Directory where downloaded and prepared files will be saved.
+    kaggle_json_path : str or Path — path to kaggle.json on Drive
+    kaggle_dataset   : str         — kaggle dataset slug e.g. 'user/caltech-256'
+    local_dir        : str         — local directory to download into.
+                                     Default: '/content/caltech256'
 
     Returns
     -------
-    None
+    Path — path to extracted 256_ObjectCategories folder
 
     Example
     -------
-    >>> download_and_prepare_dataset(DATA_DIR)
+    >>> local_data = setup_kaggle_data(
+    ...     kaggle_json_path = CKPT_ROOT / "kaggle.json",
+    ...     kaggle_dataset   = "narendraiitb27/caltech-256",
+    ... )
+    >>> train_df, val_df, test_df, class_names, class_weights = \
+    ...     load_saved_splits(DATA_DIR, local_image_dir=local_data)
     """
-    data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    kaggle_json_path = Path(kaggle_json_path)
+    local_dir        = Path(local_dir)
+    local_data       = local_dir / "256_ObjectCategories"
+
+    # ── Authenticate ──────────────────────────────────────────
+    if local_data.exists():
+        print(f" Already on local disk — {local_data}")
+        return local_data
+
+    if not kaggle_json_path.exists():
+        raise FileNotFoundError(
+            f"kaggle.json not found at {kaggle_json_path}\n"
+            f"Upload kaggle.json to your Drive root once."
+        )
+    os.makedirs("/root/.kaggle", exist_ok=True)
+    shutil.copy2(kaggle_json_path, "/root/.kaggle/kaggle.json")
+    os.chmod("/root/.kaggle/kaggle.json", 0o600)
+    print(" Kaggle authenticated.")
+
+    # ── Download + Extract ────────────────────────────────────
+    local_dir.mkdir(parents=True, exist_ok=True)
+    print(" Downloading from Kaggle...")
+    subprocess.run(
+        ["kaggle", "datasets", "download", kaggle_dataset, "-p", str(local_dir)],
+        check=True
+    )
+
+    zip_path = local_dir / f"{kaggle_dataset.split('/')[-1]}.zip"
+    print(" Extracting...")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(local_dir)
+    zip_path.unlink()
+    print(f" Dataset ready at {local_data}")
+
+    return local_data
+    
+def prepare_dataset_splits(local_dir: str, save_dir: str) -> None:
+    """
+    Checks if train/val/test splits exist in save_dir.
+    If not, reads the image directory at local_dir, splits the data,
+    and saves the manifests (CSVs) to save_dir.
+    """
+    save_dir = Path(save_dir)
+    local_dir = Path(local_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     # Guard — skip if already done
     needed = ["train.csv", "val.csv", "test.csv", "class_names.txt"]
-    if all((data_dir / f).exists() for f in needed):
-        print(" Dataset already prepared. Use load_saved_splits() to load it.")
+    if all((save_dir / f).exists() for f in needed):
+        print(f" Splits already exist in {save_dir}. Skipping creation.")
         return
 
-    # ── Download ──────────────────────────────────────────────
-    tar_path = data_dir / "256_ObjectCategories.tar"
-    extract_dir = data_dir / "256_ObjectCategories"
-
-    if not tar_path.exists() and not extract_dir.exists():
-        print(" Downloading Caltech-256 (~1.2GB)...")
-        urllib.request.urlretrieve(DATASET_URL, tar_path)
-        print(" Download complete.")
-    elif extract_dir.exists():
-        print(" Already extracted, skipping download.")
-    else:
-        print(" Archive already on Drive, skipping download.")
-
-    # ── Extract ───────────────────────────────────────────────
-    if not extract_dir.exists():
-        print(" Extracting archive...")
-        with tarfile.open(tar_path, "r") as tar:
-            tar.extractall(data_dir)
-        print(" Extraction complete.")
-    else:
-        print(" Already extracted, skipping.")
-
-    # ── Build manifest ────────────────────────────────────────
-    print(" Building train/val/test splits...")
-
+    print(f" Building train/val/test splits from {local_dir}...")
     class_dirs = sorted([
-        d for d in extract_dir.iterdir()
-        if d.is_dir() and not d.name.startswith("257")   # skip clutter class
+        d for d in local_dir.iterdir()
+        if d.is_dir() and not d.name.startswith("257")  
     ])
 
     class_names = []
     train_rows, val_rows, test_rows = [], [], []
+    
+    import random
     random.seed(21)
+    
     for label_idx, class_dir in enumerate(class_dirs):
         class_name = re.sub(r"^\d+\.", "", class_dir.name)
         class_names.append(class_name)
@@ -171,13 +189,16 @@ def download_and_prepare_dataset(data_dir: str) -> None:
         for path in images[N_TRAIN + N_VAL:N_TRAIN + N_VAL + N_TEST]:
             test_rows.append({"path": path, "label": label_idx})
 
-    # ── Save ──────────────────────────────────────────────────
-    pd.DataFrame(train_rows).to_csv(data_dir / "train.csv", index=False)
-    pd.DataFrame(val_rows).to_csv(data_dir / "val.csv",   index=False)
-    pd.DataFrame(test_rows).to_csv(data_dir / "test.csv",  index=False)
+    # Save to Drive
+    pd.DataFrame(train_rows).to_csv(save_dir / "train.csv", index=False)
+    pd.DataFrame(val_rows).to_csv(save_dir / "val.csv",   index=False)
+    pd.DataFrame(test_rows).to_csv(save_dir / "test.csv",  index=False)
 
-    with open(data_dir / "class_names.txt", "w") as f:
+    with open(save_dir / "class_names.txt", "w") as f:
         f.write("\n".join(class_names))
+        
+    print(f" Splits saved successfully to {save_dir}.")
+
 
 def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     """
@@ -247,74 +268,7 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
 
     return train_df, val_df, test_df, class_names , class_weights
     
-def setup_kaggle_data(
-    kaggle_json_path,
-    kaggle_dataset:  str,
-    local_dir:       str = "/content/caltech256",
-) -> Path:
-    """
-    Authenticate Kaggle, download dataset zip to local_dir,
-    extract it, and return the path to 256_ObjectCategories.
 
-    Safe to call every session — skips download if already extracted.
-
-    Parameters
-    ----------
-    kaggle_json_path : str or Path — path to kaggle.json on Drive
-    kaggle_dataset   : str         — kaggle dataset slug e.g. 'user/caltech-256'
-    local_dir        : str         — local directory to download into.
-                                     Default: '/content/caltech256'
-
-    Returns
-    -------
-    Path — path to extracted 256_ObjectCategories folder
-
-    Example
-    -------
-    >>> local_data = setup_kaggle_data(
-    ...     kaggle_json_path = CKPT_ROOT / "kaggle.json",
-    ...     kaggle_dataset   = "narendraiitb27/caltech-256",
-    ... )
-    >>> train_df, val_df, test_df, class_names, class_weights = \
-    ...     load_saved_splits(DATA_DIR, local_image_dir=local_data)
-    """
-    kaggle_json_path = Path(kaggle_json_path)
-    local_dir        = Path(local_dir)
-    local_data       = local_dir / "256_ObjectCategories"
-
-    # ── Authenticate ──────────────────────────────────────────
-    if local_data.exists():
-        print(f" Already on local disk — {local_data}")
-        return local_data
-
-    if not kaggle_json_path.exists():
-        raise FileNotFoundError(
-            f"kaggle.json not found at {kaggle_json_path}\n"
-            f"Upload kaggle.json to your Drive root once."
-        )
-    os.makedirs("/root/.kaggle", exist_ok=True)
-    shutil.copy2(kaggle_json_path, "/root/.kaggle/kaggle.json")
-    os.chmod("/root/.kaggle/kaggle.json", 0o600)
-    print(" Kaggle authenticated.")
-
-    # ── Download + Extract ────────────────────────────────────
-    
-    local_dir.mkdir(parents=True, exist_ok=True)
-    print(" Downloading from Kaggle...")
-    subprocess.run(
-        ["kaggle", "datasets", "download", kaggle_dataset, "-p", str(local_dir)],
-        check=True
-    )
-
-    zip_path = local_dir / f"{kaggle_dataset.split('/')[-1]}.zip"
-    print(" Extracting...")
-    with zipfile.ZipFile(zip_path, "r") as z:
-        z.extractall(local_dir)
-    zip_path.unlink()
-    print(f" Done. Dataset ready at {local_data}")
-
-    return local_data
-    
 # ─────────────────────────────────────────────
 # 2. tf.data pipeline
 # ────────────────────────────────────────────-
