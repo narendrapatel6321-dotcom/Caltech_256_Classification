@@ -33,6 +33,7 @@ from pathlib import Path
 from sklearn.metrics import classification_report
 import tensorflow as tf
 import os, shutil, zipfile, subprocess
+import random
 
 # ─────────────────────────────────────────────
 # Constants
@@ -106,8 +107,6 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     -------
     >>> download_and_prepare_dataset(DATA_DIR)
     """
-    import random
-
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +150,6 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     train_rows, val_rows, test_rows = [], [], []
     random.seed(21)
     for label_idx, class_dir in enumerate(class_dirs):
-        # Extract clean name e.g. "001.ak47" → "ak47"
         class_name = re.sub(r"^\d+\.", "", class_dir.name)
         class_names.append(class_name)
 
@@ -180,23 +178,6 @@ def download_and_prepare_dataset(data_dir: str) -> None:
 
     with open(data_dir / "class_names.txt", "w") as f:
         f.write("\n".join(class_names))
-
-    # Per-class train size distribution summary
-    train_df_temp  = pd.DataFrame(train_rows)
-    counts         = train_df_temp.groupby("label").size()
-    tiny           = (counts < 62).sum()   
-    mid            = ((counts >= 62) & (counts < 100)).sum()
-    capped         = (counts == 100).sum()
-
-    print(f"\n Dataset saved to {data_dir}")
-    print(f"   Classes : {len(class_names)}")
-    print(f"   Train   : {len(train_rows):,} images  (prev: {46 * len(class_names):,}  gain: +{len(train_rows) - 46 * len(class_names):,})")
-    print(f"   Val     : {len(val_rows):,} images")
-    print(f"   Test    : {len(test_rows):,} images")
-    print(f"\n   Train size distribution:")
-    print(f"     < 62  images/class (tiny,  e.g. galaxy) : {tiny} classes")
-    print(f"     62–99 images/class (mid tier)            : {mid} classes")
-    print(f"     100   images/class (capped at max)       : {capped} classes")
 
 def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     """
