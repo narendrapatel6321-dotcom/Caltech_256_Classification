@@ -372,6 +372,7 @@ def make_tf_dataset(
     batch_size: int  = 64,
     augment:    bool = True,
     seed:       int  = 21,
+    class_weights: dict = None, 
 ) -> tf.data.Dataset:
     """
     Build an optimized tf.data pipeline for image classification.
@@ -388,6 +389,7 @@ def make_tf_dataset(
     batch_size  : int  — batch size. Default: 64
     augment     : bool — enable standard augmentation (train only). Default: True
     seed        : int  — shuffle seed. Default: 21
+    class_weights: dict = None, 
 
     Returns
     -------
@@ -418,11 +420,21 @@ def make_tf_dataset(
         lambda p, l: _load_and_preprocess(p, l, img_size, split if do_aug else "val"),
         num_parallel_calls=AUTOTUNE
     )
+ 
+    if class_weights is not None:
+        keys = tf.constant(list(class_weights.keys()), dtype=tf.int32)
+        vals = tf.constant(list(class_weights.values()), dtype=tf.float32)
+        initializer = tf.lookup.KeyValueTensorInitializer(keys, vals)
+        table = tf.lookup.StaticHashTable(initializer, default_value=1.0)
+        
+        ds = ds.map(
+            lambda img, label: (img, label, table.lookup(label)),
+            num_parallel_calls=AUTOTUNE
+        )
+
     ds = ds.batch(batch_size, drop_remainder=(split == "train"))
-    
     ds = ds.prefetch(AUTOTUNE)
     return ds
-
 
 def plot_sample_images(
     dataset,
