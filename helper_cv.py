@@ -8,6 +8,7 @@ Functions
 ---------
     download_and_prepare_dataset(data_dir)
     load_saved_splits(data_dir)
+    setup_kaggle_data(kaggle_json_path, kaggle_dataset:  str, local_dir:       str = "/content/caltech256",)
     make_tf_dataset(paths, labels, split, img_size, batch_size, augment, seed)
     plot_sample_images(dataset, class_names, n_per_row, n_rows, save_path)
     plot_augmentation_preview(image_path, save_path)
@@ -31,7 +32,7 @@ import matplotlib.cm as cm
 from pathlib import Path
 from sklearn.metrics import classification_report
 import tensorflow as tf
-
+import os, shutil, zipfile, subprocess
 
 # ─────────────────────────────────────────────
 # Constants
@@ -50,7 +51,6 @@ GRADCAM_LAYERS = {
     "efficientnetv2-l": "top_conv",
     "convnext":         "convnext_base_stage_3_block_2_depthwise_conv",
 }
-
 
 # ─────────────────────────────────────────────
 # Internal helper
@@ -96,7 +96,7 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     Parameters
     ----------
     data_dir : str or Path
-        Directory on Google Drive where files will be saved.
+        Directory where downloaded and prepared files will be saved.
 
     Returns
     -------
@@ -122,9 +122,11 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     extract_dir = data_dir / "256_ObjectCategories"
 
     if not tar_path.exists() and not extract_dir.exists():
-        print(" Downloading Caltech-256 (~1.2GB)... this will take a few minutes.")
+        print(" Downloading Caltech-256 (~1.2GB)...")
         urllib.request.urlretrieve(DATASET_URL, tar_path)
         print(" Download complete.")
+    elif extract_dir.exists():
+        print(" Already extracted, skipping download.")
     else:
         print(" Archive already on Drive, skipping download.")
 
@@ -295,13 +297,15 @@ def setup_kaggle_data(
     >>> train_df, val_df, test_df, class_names, class_weights = \
     ...     load_saved_splits(DATA_DIR, local_image_dir=local_data)
     """
-    import os, shutil, zipfile, subprocess
-
     kaggle_json_path = Path(kaggle_json_path)
     local_dir        = Path(local_dir)
     local_data       = local_dir / "256_ObjectCategories"
 
     # ── Authenticate ──────────────────────────────────────────
+    if local_data.exists():
+        print(f" Already on local disk — {local_data}")
+        return local_data
+
     if not kaggle_json_path.exists():
         raise FileNotFoundError(
             f"kaggle.json not found at {kaggle_json_path}\n"
@@ -313,10 +317,7 @@ def setup_kaggle_data(
     print(" Kaggle authenticated.")
 
     # ── Download + Extract ────────────────────────────────────
-    if local_data.exists():
-        print(f" Already on local disk — {local_data}")
-        return local_data
-
+    
     local_dir.mkdir(parents=True, exist_ok=True)
     print(" Downloading from Kaggle...")
     subprocess.run(
@@ -335,7 +336,9 @@ def setup_kaggle_data(
     
 # ─────────────────────────────────────────────
 # 2. tf.data pipeline
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────-
+
+_rot_layer = tf.keras.layers.RandomRotation(0.1)
 
 def _load_and_preprocess(path, label, img_size, split):
     """
@@ -354,7 +357,7 @@ def _load_and_preprocess(path, label, img_size, split):
     if split == "train":
         img = tf.image.random_crop(img, [img_size, img_size, 3])
         img = tf.image.random_flip_left_right(img)
-        img = tf.keras.layers.RandomRotation(0.1)(img)
+        img = _rot_layer(img, training=True)
         img = tf.image.random_brightness(img, 0.2)
         img = tf.image.random_contrast(img, 0.8, 1.2)
         img = tf.image.random_saturation(img, 0.8, 1.2)
@@ -966,6 +969,7 @@ def grad_cam(
 
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_tensor)
+        tape.watch(conv_outputs) 
         loss = predictions[:, class_idx]
 
     # Gradients of the class score w.r.t. the conv feature maps
