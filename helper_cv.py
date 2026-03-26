@@ -258,7 +258,76 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     print(f"   Train   : {len(train_df):,} | Val : {len(val_df):,} | Test : {len(test_df):,}")
 
     return train_df, val_df, test_df, class_names , class_weights
+    
+def setup_kaggle_data(
+    kaggle_json_path,
+    kaggle_dataset:  str,
+    local_dir:       str = "/content/caltech256",
+) -> Path:
+    """
+    Authenticate Kaggle, download dataset zip to local_dir,
+    extract it, and return the path to 256_ObjectCategories.
 
+    Safe to call every session — skips download if already extracted.
+
+    Parameters
+    ----------
+    kaggle_json_path : str or Path — path to kaggle.json on Drive
+    kaggle_dataset   : str         — kaggle dataset slug e.g. 'user/caltech-256'
+    local_dir        : str         — local directory to download into.
+                                     Default: '/content/caltech256'
+
+    Returns
+    -------
+    Path — path to extracted 256_ObjectCategories folder
+
+    Example
+    -------
+    >>> local_data = setup_kaggle_data(
+    ...     kaggle_json_path = CKPT_ROOT / "kaggle.json",
+    ...     kaggle_dataset   = "narendraiitb27/caltech-256",
+    ... )
+    >>> train_df, val_df, test_df, class_names, class_weights = \
+    ...     load_saved_splits(DATA_DIR, local_image_dir=local_data)
+    """
+    import os, shutil, zipfile, subprocess
+
+    kaggle_json_path = Path(kaggle_json_path)
+    local_dir        = Path(local_dir)
+    local_data       = local_dir / "256_ObjectCategories"
+
+    # ── Authenticate ──────────────────────────────────────────
+    if not kaggle_json_path.exists():
+        raise FileNotFoundError(
+            f"kaggle.json not found at {kaggle_json_path}\n"
+            f"Upload kaggle.json to your Drive root once."
+        )
+    os.makedirs("/root/.kaggle", exist_ok=True)
+    shutil.copy2(kaggle_json_path, "/root/.kaggle/kaggle.json")
+    os.chmod("/root/.kaggle/kaggle.json", 0o600)
+    print(" Kaggle authenticated.")
+
+    # ── Download + Extract ────────────────────────────────────
+    if local_data.exists():
+        print(f" Already on local disk — {local_data}")
+        return local_data
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    print(" Downloading from Kaggle...")
+    subprocess.run(
+        ["kaggle", "datasets", "download", kaggle_dataset, "-p", str(local_dir)],
+        check=True
+    )
+
+    zip_path = local_dir / f"{kaggle_dataset.split('/')[-1]}.zip"
+    print(" Extracting...")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(local_dir)
+    zip_path.unlink()
+    print(f" Done. Dataset ready at {local_data}")
+
+    return local_data
+    
 # ─────────────────────────────────────────────
 # 2. tf.data pipeline
 # ─────────────────────────────────────────────
