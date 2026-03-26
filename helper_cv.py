@@ -338,15 +338,12 @@ def setup_kaggle_data(
 # 2. tf.data pipeline
 # ────────────────────────────────────────────-
 
-_rot_layer = tf.keras.layers.RandomRotation(0.1)
-
 def _load_and_preprocess(path, label, img_size, split):
     """
     Read an image from disk, decode, resize and cast to float32 (no normalization applied)
     Training images receive random augmentation including:
         - random crop
         - horizontal flip
-        - rotation
         - brightness / contrast / saturation / hue adjustments
     val/test get only resize 
     """
@@ -357,7 +354,6 @@ def _load_and_preprocess(path, label, img_size, split):
     if split == "train":
         img = tf.image.random_crop(img, [img_size, img_size, 3])
         img = tf.image.random_flip_left_right(img)
-        img = _rot_layer(img, training=True)
         img = tf.image.random_brightness(img, 0.2)
         img = tf.image.random_contrast(img, 0.8, 1.2)
         img = tf.image.random_saturation(img, 0.8, 1.2)
