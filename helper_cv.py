@@ -156,9 +156,9 @@ def download_and_prepare_dataset(data_dir: str) -> None:
             if p.suffix.lower() in (".jpg", ".jpeg", ".png")
         ])
  
-        N_TRAIN = 46
         N_VAL   = 9
         N_TEST  = 9
+        N_TRAIN = min(len(images) - N_VAL - N_TEST, 100)
 
         random.shuffle(images)
 
@@ -177,11 +177,22 @@ def download_and_prepare_dataset(data_dir: str) -> None:
     with open(data_dir / "class_names.txt", "w") as f:
         f.write("\n".join(class_names))
 
+    # Per-class train size distribution summary
+    train_df_temp  = pd.DataFrame(train_rows)
+    counts         = train_df_temp.groupby("label").size()
+    tiny           = (counts < 62).sum()   # below 80-image classes (galaxy tier)
+    mid            = ((counts >= 62) & (counts < 100)).sum()
+    capped         = (counts == 100).sum()
+
     print(f"\n Dataset saved to {data_dir}")
     print(f"   Classes : {len(class_names)}")
-    print(f"   Train   : {len(train_rows):,} images")
+    print(f"   Train   : {len(train_rows):,} images  (prev: {46 * len(class_names):,}  gain: +{len(train_rows) - 46 * len(class_names):,})")
     print(f"   Val     : {len(val_rows):,} images")
     print(f"   Test    : {len(test_rows):,} images")
+    print(f"\n   Train size distribution:")
+    print(f"     < 62  images/class (tiny,  e.g. galaxy) : {tiny} classes")
+    print(f"     62–99 images/class (mid tier)            : {mid} classes")
+    print(f"     100   images/class (capped at max)       : {capped} classes")
 
 def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     """
@@ -195,12 +206,14 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     data_dir : str or Path
         Directory containing train.csv, val.csv, test.csv, class_names.txt.
 
-    Returns
-    -------
-    tuple : (train_df, val_df, test_df, class_names)
+   Returns
+   -------
+    tuple : (train_df, val_df, test_df, class_names, class_weights)
         train_df / val_df / test_df : pd.DataFrame with columns 'path', 'label'
         class_names                 : list of str, index = label integer
-
+        class_weights               : dict {label_int: float} — inverse-frequency
+                                      weights normalized to mean=1, pass directly
+                                      to model.fit(class_weight=class_weights)
     Raises
     ------
     FileNotFoundError
@@ -225,6 +238,13 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
 
     with open(data_dir / "class_names.txt") as f:
         class_names = [line.strip() for line in f.readlines()]
+
+    # Compute class weights — inverse frequency, normalized to mean=1
+    counts       = train_df["label"].value_counts().sort_index()
+    weights      = counts.sum() / (len(counts) * counts)   # inverse freq
+    weights      = weights / weights.mean()                 # normalize → mean=1
+    class_weights = weights.to_dict()  # {label_int: weight_float}
+    
     if local_image_dir is not None:
         local_image_dir = Path(local_image_dir)
         for df in [train_df, val_df, test_df]:
@@ -237,7 +257,7 @@ def load_saved_splits(data_dir: str, local_image_dir: str = None) -> tuple:
     print(f"   Classes : {len(class_names)}")
     print(f"   Train   : {len(train_df):,} | Val : {len(val_df):,} | Test : {len(test_df):,}")
 
-    return train_df, val_df, test_df, class_names
+    return train_df, val_df, test_df, class_names , class_weights
 
 # ─────────────────────────────────────────────
 # 2. tf.data pipeline
@@ -255,6 +275,7 @@ def _load_and_preprocess(path, label, img_size, split):
     if split == "train":
         img = tf.image.random_crop(img, [img_size, img_size, 3])
         img = tf.image.random_flip_left_right(img)
+        img = tf.keras.layers.RandomRotation(0.1)(img)
         img = tf.image.random_brightness(img, 0.2)
         img = tf.image.random_contrast(img, 0.8, 1.2)
         img = tf.image.random_saturation(img, 0.8, 1.2)
