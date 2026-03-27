@@ -158,7 +158,6 @@ class TrainingStateCallback(Callback):
 # ─────────────────────────────────────────────
 # Stateful EarlyStopping
 # ─────────────────────────────────────────────
-
 class StatefulEarlyStopping(EarlyStopping):
     """
     EarlyStopping that restores its internal counter and best value
@@ -187,6 +186,11 @@ class StatefulEarlyStopping(EarlyStopping):
                 self.best_weights = self.model.get_weights()
             print(f" EarlyStopping restored — best={self.best:.4f}, patience_counter={self.wait}")
 
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        if logs is not None:
+            logs['patience'] = self.wait
+            logs['best_metric'] = self.best
 # ─────────────────────────────────────────────
 # Stateful ModelCheckpoint
 # ─────────────────────────────────────────────
