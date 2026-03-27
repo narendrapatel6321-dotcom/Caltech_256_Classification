@@ -687,6 +687,8 @@ class ResumableTrainer:
         
         # 3. Find latest checkpoint
         latest_ckpt, resume_epoch = self._get_latest_checkpoint()
+        
+        self._sync_state_with_csv(resume_epoch)
 
         # 4. Load or build model
         
