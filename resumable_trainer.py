@@ -459,7 +459,47 @@ class ResumableTrainer:
         with open(tmp, 'w') as f:
             json.dump(self.state, f, indent=2)
         tmp.replace(self.state_path)
+        
+    def _sync_state_with_csv(self, resume_epoch: int):
+        """
+        Reconstructs the training state strictly from the CSV log up to the 
+        point of resume. This fixes time travel bugs if checkpoints are deleted.
+        """
+        if not self.csv_log_path.exists() or resume_epoch == 0:
+            return
 
+        try:
+            df = pd.read_csv(self.csv_log_path)
+            
+            historical_df = df[df['epoch'] < resume_epoch].copy()
+            
+            if historical_df.empty:
+                return
+
+            if len(historical_df) < len(df):
+                print(f" Truncating log: removed {len(df) - len(historical_df)} orphaned future epoch(s).")
+                historical_df.to_csv(self.csv_log_path, index=False)
+
+            last_row = historical_df.iloc[-1]
+            
+            if self.monitor in historical_df.columns:
+                if self.mode == 'max':
+                    best_val = historical_df[self.monitor].max()
+                else:
+                    best_val = historical_df[self.monitor].min()
+                
+                self.state['best_val_metric'] = float(best_val)
+                print(f" Restored best {self.monitor} from log: {best_val:.4f}")
+
+            if 'patience' in historical_df.columns:
+                self.state['patience_counter'] = int(last_row['patience'])
+                print(f" Restored patience from log: {int(last_row['patience'])}")
+            
+            self.state['last_epoch'] = resume_epoch
+
+        except Exception as e:
+            print(f" WARNING: Could not sync state with CSV log — {e}")
+            
     def _get_latest_checkpoint(self):
         """
         Find the latest valid (non-corrupted) epoch checkpoint file.
@@ -483,8 +523,32 @@ class ResumableTrainer:
             print(" All epoch checkpoints corrupted — checking for best model fallback...")
 
         if self.best_model_path.exists() and self.best_model_path.stat().st_size > 1024:
+            
+            best_epoch = None
+            if self.csv_log_path.exists():
+                try:
+                    df = pd.read_csv(self.csv_log_path)
+                    if self.monitor in df.columns:
+                        if self.mode == 'max':
+                            best_idx = df[self.monitor].idxmax()
+                        else:
+                            best_idx = df[self.monitor].idxmin()
+                        best_epoch = int(df.loc[best_idx, 'epoch']) + 1
+                except Exception:
+                    pass
+            
+            if best_epoch is None:
+                last_epoch = self.state.get('last_epoch', 0)
+                best_epoch = self.state.get('best_epoch', last_epoch)
+            
+            print(f"\n WARNING: Standard epoch checkpoints are missing.")
+            print(f" The script wants to fall back to the best model (Epoch {best_epoch}).")
+            
+            response = self._prompt_user("Do you want to resume from this best model? [y/n]: ")
+            if response != 'y':
+                raise RuntimeError("Training aborted by user. Please check your checkpoint files.")
+            
             last_epoch = self.state.get('last_epoch', 0)
-            best_epoch = self.state.get('best_epoch', last_epoch)
             lost_epochs = last_epoch - best_epoch
 
             if lost_epochs > 0 and self.csv_log_path.exists():
