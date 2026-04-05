@@ -284,7 +284,7 @@ predict_image(
 
 The function displays the input image alongside a horizontal bar chart of the top-5 predicted classes and their confidence scores.
 
-> Pre-trained weights are available on Google Drive. Link: *(add your Drive share link here)*
+> Pre-trained weights are available on Google Drive. Link: ![Drive](https://drive.google.com/drive/folders/1sj-58gaUJZf348CvakdTq2F4ke552EMX?usp=sharing)
 
 ---
 
